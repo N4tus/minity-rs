@@ -41,12 +41,14 @@ impl Vertex {
 }
 
 pub(crate) struct Group {
-    indices: Vec<usize>,
+    indices_start: usize,
+    indices_count: usize,
     transformation: Matrix4<f32>,
 }
 
 pub(crate) struct Model {
     pub(crate) vertices: Vec<Vertex>,
+    pub(crate) indices: Vec<u32>,
     pub(crate) groups: HashMap<String, Group>,
 }
 
@@ -149,9 +151,10 @@ fn load_model_with_path(path: impl Into<PathBuf>) -> Result<Model, LoadError> {
     }
 
     let mut groups = HashMap::new();
-
+    let mut indices =
+        Vec::with_capacity(obj.faces.values().map(|f| f.len() * 3).sum1().unwrap_or(0));
     for (name, group) in obj.faces {
-        let mut indices = Vec::with_capacity(group.len() * 3);
+        let indices_start = indices.len();
         for face in group {
             if face.elements.len() != 3 {
                 return Err(LoadError::FormatError(
@@ -159,21 +162,23 @@ fn load_model_with_path(path: impl Into<PathBuf>) -> Result<Model, LoadError> {
                 ));
             }
             for f in face.elements {
-                let v = (f.vertex_index - 1) as usize;
+                let v = (f.vertex_index - 1) as u32;
                 indices.push(v);
             }
         }
         groups.insert(
             name,
             Group {
-                indices,
+                indices_start,
                 transformation: Matrix4::identity(),
+                indices_count: indices.len() - indices_start,
             },
         );
     }
 
     Ok(Model {
         vertices: vertex_data,
+        indices,
         groups,
     })
 }

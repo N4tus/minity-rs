@@ -18,6 +18,7 @@ type ModelData = Rc<RefCell<Option<Model>>>;
 pub(crate) struct ModelRenderer {
     model: ModelData,
     vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
 }
 
 pub(crate) struct ModelRendererBuilder {
@@ -34,22 +35,33 @@ impl RendererBuilder for ModelRendererBuilder {
     type Output = ModelRenderer;
 
     fn build(self, device: &wgpu::Device) -> Self::Output {
-        let vertex_buffer: wgpu::Buffer = {
+        let (vertex_buffer, index_buffer) = {
             let model = RefCell::borrow(&*self.model);
-            let data = if let Some(m) = &*model {
-                bytemuck::cast_slice(m.vertices.as_slice())
+            let (data, indices) = if let Some(m) = &*model {
+                (
+                    bytemuck::cast_slice(m.vertices.as_slice()),
+                    bytemuck::cast_slice(m.indices.as_slice()),
+                )
             } else {
-                &[0u8; 0]
+                ([0u8; 0].as_slice(), [0u8; 0].as_slice())
             };
-            device.create_buffer_init(&BufferInitDescriptor {
-                label: Some("model vertex attribute buffer"),
-                contents: data,
-                usage: BufferUsages::VERTEX,
-            })
+            (
+                device.create_buffer_init(&BufferInitDescriptor {
+                    label: Some("model vertex attribute buffer"),
+                    contents: data,
+                    usage: BufferUsages::VERTEX,
+                }),
+                device.create_buffer_init(&BufferInitDescriptor {
+                    label: Some("model index buffer"),
+                    contents: indices,
+                    usage: BufferUsages::INDEX,
+                }),
+            )
         };
         Self::Output {
             model: self.model,
             vertex_buffer,
+            index_buffer,
         }
     }
 }
@@ -82,7 +94,8 @@ impl Renderer for ModelRenderer {
             // NEW!
             render_pass.set_pipeline(wgpu.current_render_pipeline().as_ref().unwrap()); // 2.
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            render_pass.draw(0..model.vertices.len() as u32, 0..1); // 3.
+            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            render_pass.draw_indexed(0..model.indices.len() as u32, 0, 0..1); // 3.
         }
     }
 
