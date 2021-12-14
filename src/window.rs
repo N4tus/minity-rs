@@ -36,6 +36,7 @@ impl Window {
             *control_flow = ControlFlow::Wait;
             platform.handle_event(&event);
             let egui_handled_event = platform.captures_event(&event);
+            let mut do_render = false;
             match event {
                 event::Event::WindowEvent {
                     ref event,
@@ -55,9 +56,11 @@ impl Window {
                             } => *control_flow = ControlFlow::Exit,
                             WindowEvent::Resized(physical_size) => {
                                 renderer.resize(*physical_size);
+                                do_render = true;
                             }
                             WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
                                 renderer.resize(**new_inner_size);
+                                do_render = true;
                             }
                             _ => {}
                         }
@@ -67,25 +70,28 @@ impl Window {
                     platform.update_time(start_time.elapsed().as_secs_f64());
 
                     renderer.update();
-                    match renderer.render(
-                        self.window.scale_factor() as _,
-                        &mut platform,
-                        &|platform| platform.end_frame(Some(&self.window)).1,
-                    ) {
-                        Ok(actions) => {
-                            if actions.quit {
-                                *control_flow = ControlFlow::Exit
-                            }
-                        }
-                        Err(wgpu::SurfaceError::Lost) => renderer.resize(PhysicalSize::new(0, 0)),
-                        Err(wgpu::SurfaceError::OutOfMemory) => *control_flow = ControlFlow::Exit,
-                        Err(e) => eprintln!("{:?}", e),
-                    };
+                    do_render = true;
                 }
                 event::Event::MainEventsCleared => {
                     self.window.request_redraw();
                 }
                 _ => {}
+            }
+            if do_render {
+                match renderer.render(
+                    self.window.scale_factor() as _,
+                    &mut platform,
+                    &|platform| platform.end_frame(Some(&self.window)).1,
+                ) {
+                    Ok(actions) => {
+                        if actions.quit {
+                            *control_flow = ControlFlow::Exit
+                        }
+                    }
+                    Err(wgpu::SurfaceError::Lost) => renderer.resize(PhysicalSize::new(0, 0)),
+                    Err(wgpu::SurfaceError::OutOfMemory) => *control_flow = ControlFlow::Exit,
+                    Err(e) => eprintln!("{:?}", e),
+                };
             }
         })
     }

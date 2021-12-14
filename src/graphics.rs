@@ -260,6 +260,9 @@ where
         self.state
             .surface
             .configure(&self.state.device, &self.state.config);
+        if let Some(renderers) = &mut self.renderers {
+            renderers.resize(new_size);
+        }
     }
 
     fn input(&mut self, event: &WindowEvent) -> bool {

@@ -1,6 +1,6 @@
 use crate::objects::Vertex;
 use crate::{Model, Renderer, RendererBuilder, ShaderAction, UiActions, WGPU};
-use cgmath::{EuclideanSpace, InnerSpace, SquareMatrix};
+use cgmath::{EuclideanSpace, InnerSpace, Rotation, Rotation3, SquareMatrix};
 use egui::{CtxRef, Ui};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -220,24 +220,14 @@ impl Renderer for Camera {
 
                     let rot_axis = self.x_axis * dir.y + self.y_axis * dir.x;
 
-                    let rot_angle = dir.magnitude().to_radians() / 2.0;
-                    let theta_2 = rot_angle / 2.0;
-                    let qrot = cgmath::Quaternion::from_sv(
-                        f32::cos(theta_2),
-                        rot_axis.normalize() * f32::sin(theta_2),
-                    );
-                    let invert_rot = qrot.conjugate();
+                    let rot_angle = dir.magnitude() / 2.0;
+                    let qrot =
+                        cgmath::Quaternion::from_axis_angle(rot_axis, cgmath::Deg(rot_angle));
 
-                    let rotator = |vec: cgmath::Vector3<f32>| {
-                        (qrot.s * qrot.s - cgmath::dot(qrot.v, qrot.v)) * vec
-                            + 2.0 * cgmath::dot(qrot.v, vec) * qrot.v
-                            + 2.0 * qrot.s * qrot.v.cross(vec)
-                    };
-
-                    self.eye = cgmath::Point3::from_vec(rotator(self.eye.to_vec()));
-                    self.up = rotator(self.up);
-                    self.x_axis = rotator(self.x_axis);
-                    self.y_axis = rotator(self.y_axis);
+                    self.eye = qrot.rotate_point(self.eye);
+                    self.up = qrot.rotate_vector(self.up);
+                    self.x_axis = qrot.rotate_vector(self.x_axis);
+                    self.y_axis = qrot.rotate_vector(self.y_axis);
 
                     self.update_camera();
 
