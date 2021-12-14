@@ -1,5 +1,5 @@
 use crate::RenderBackend;
-use egui::FontDefinitions;
+use egui::{egui_assert, FontDefinitions};
 use egui_winit_platform::{Platform, PlatformDescriptor};
 use std::time::Instant;
 use winit::dpi::PhysicalSize;
@@ -33,14 +33,15 @@ impl Window {
         let start_time = Instant::now();
         renderer.init();
         self.event_loop.run(move |event, _, control_flow| {
-            platform.handle_event(&event);
             *control_flow = ControlFlow::Wait;
+            platform.handle_event(&event);
+            let egui_handled_event = platform.captures_event(&event);
             match event {
                 event::Event::WindowEvent {
                     ref event,
                     window_id,
                 } if window_id == self.window.id() => {
-                    if !renderer.input(event) {
+                    if egui_handled_event || !renderer.input(event) {
                         match event {
                             WindowEvent::CloseRequested
                             | WindowEvent::KeyboardInput {

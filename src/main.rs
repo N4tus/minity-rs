@@ -1,18 +1,20 @@
 #![feature(maybe_uninit_uninit_array)]
 #![feature(generic_const_exprs)]
 #![feature(maybe_uninit_array_assume_init)]
+#![feature(maybe_uninit_slice)]
 
 use crate::graphics::WGPURenderer;
 use crate::objects::{load_model, LoadError, Model};
-use crate::renderer::ModelRendererBuilder;
+use crate::renderer::{CameraBuilder, ModelRendererBuilder};
 use crate::window::Window;
 use egui::paint::ClippedShape;
 use egui::{CtxRef, Ui};
 use egui_winit_platform::Platform;
 use std::cell::RefCell;
+use std::mem::MaybeUninit;
 use std::rc::Rc;
 use tuple_list::tuple_list;
-use wgpu::{CommandEncoder, RenderPipeline, TextureView};
+use wgpu::{BindGroup, CommandEncoder, RenderPipeline, TextureView};
 use winit::dpi::PhysicalSize;
 
 mod graphics;
@@ -42,14 +44,18 @@ struct UiActions {
 
 trait RendererBuilder {
     type Output: Renderer;
-    fn build(self, device: &wgpu::Device) -> Self::Output;
+    fn build(self, device: &wgpu::Device, size: PhysicalSize<u32>) -> Self::Output;
 }
 
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Clone)]
 pub(crate) struct WGPU<'a> {
+    pub(crate) queue: &'a wgpu::Queue,
     pub(crate) command_encoder: &'a RefCell<CommandEncoder>,
     pub(crate) view: &'a TextureView,
     pub(crate) render_pipelines: &'a [Option<RenderPipeline>],
+    pub(crate) uniforms: &'a [MaybeUninit<BindGroup>],
+    pub(crate) current_uniforms: &'a [(usize, usize)],
     pub(crate) renderer_index: usize,
 }
 
@@ -57,13 +63,28 @@ impl<'a> WGPU<'a> {
     pub(crate) fn current_render_pipeline(&'a self) -> &'a Option<RenderPipeline> {
         &self.render_pipelines[self.renderer_index]
     }
+    pub(crate) fn current_uniforms(&'a self) -> &'a [BindGroup] {
+        let (uniform_start, uniform_count) = self.current_uniforms[self.renderer_index];
+        let uninit_slice = &self.uniforms[uniform_start..(uniform_start + uniform_count)];
+        unsafe { MaybeUninit::slice_assume_init_ref(uninit_slice) }
+    }
+}
+
+enum ShaderAction<'a> {
+    CreatePipeline(&'static str, wgpu::VertexBufferLayout<'static>),
+    AddUniform(&'static str, u32, wgpu::ShaderStages, &'a wgpu::Buffer),
 }
 
 trait Renderer {
-    fn render(&mut self, wgpu: WGPU);
-    fn render_ui(&mut self, ctx: &CtxRef, menu_ui: &mut Ui, actions: &mut UiActions);
-    fn input(&mut self, event: &winit::event::WindowEvent) -> bool;
-    fn shader(&self) -> Option<(&str, wgpu::VertexBufferLayout)>;
+    fn render(&mut self, _wgpu: WGPU) {}
+    fn render_ui(&mut self, _ctx: &CtxRef, _menu_ui: &mut Ui, _actions: &mut UiActions) {}
+    fn input(&mut self, _event: &winit::event::WindowEvent) -> bool {
+        false
+    }
+    fn shader(&self) -> Option<ShaderAction> {
+        None
+    }
+    fn resize(&mut self, _size: PhysicalSize<u32>) {}
 }
 
 fn main() {
@@ -81,6 +102,13 @@ fn main() {
     }
     let window = Window::new();
     let model_renderer = ModelRendererBuilder::new(Rc::new(RefCell::new(model)));
-    let renderer = WGPURenderer::new(&window, tuple_list!(model_renderer));
+    let camera = CameraBuilder {
+        eye: (0.0, 1.0, 2.0).into(),
+        target: (0.0, 0.0, 0.0).into(),
+        fovy: 45.0,
+        znear: 0.1,
+        zfar: 100.0,
+    };
+    let renderer = WGPURenderer::new(&window, tuple_list!(model_renderer, camera));
     window.run(renderer);
 }

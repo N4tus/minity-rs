@@ -1,6 +1,6 @@
 use bytemuck::{Pod, Zeroable};
-use cgmath::{Matrix4, SquareMatrix, Vector2, Vector3, Zero};
-use itertools::{EitherOrBoth, Itertools};
+use cgmath::{Matrix4, SquareMatrix, Vector3};
+use itertools::Itertools;
 use native_dialog::FileDialog;
 use nobject_rs::{load_mtl, load_obj, ObjError};
 use std::collections::HashMap;
