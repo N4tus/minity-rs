@@ -7,7 +7,7 @@ use std::rc::Rc;
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::BufferUsages;
 use winit::dpi::PhysicalSize;
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 
 mod shader;
 
@@ -228,16 +228,16 @@ impl Renderer for Camera {
                     );
                     let invert_rot = qrot.conjugate();
 
-                    let rotator = |vec: cgmath::Vector3<f32>, qrot: cgmath::Quaternion<f32>| {
+                    let rotator = |vec: cgmath::Vector3<f32>| {
                         (qrot.s * qrot.s - cgmath::dot(qrot.v, qrot.v)) * vec
                             + 2.0 * cgmath::dot(qrot.v, vec) * qrot.v
                             + 2.0 * qrot.s * qrot.v.cross(vec)
                     };
 
-                    self.eye = cgmath::Point3::from_vec(rotator(self.eye.to_vec(), qrot));
-                    self.up = rotator(self.up, qrot);
-                    self.x_axis = rotator(self.x_axis, qrot);
-                    self.y_axis = rotator(self.y_axis, qrot);
+                    self.eye = cgmath::Point3::from_vec(rotator(self.eye.to_vec()));
+                    self.up = rotator(self.up);
+                    self.x_axis = rotator(self.x_axis);
+                    self.y_axis = rotator(self.y_axis);
 
                     self.update_camera();
 
@@ -247,6 +247,19 @@ impl Renderer for Camera {
                     self.mouse_pos = cgmath::Point2::new(position.x as f32, position.y as f32);
                     false
                 }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let delta = match delta {
+                    MouseScrollDelta::LineDelta(_, d) => *d,
+                    MouseScrollDelta::PixelDelta(px) => px.y as f32,
+                };
+                if delta >= 0.0 {
+                    self.eye /= delta + 1.0;
+                } else {
+                    self.eye *= -delta + 1.0;
+                }
+                self.update_camera();
+                true
             }
             _ => false,
         }
