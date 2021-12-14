@@ -1,5 +1,5 @@
 use crate::RenderBackend;
-use egui::{egui_assert, FontDefinitions};
+use egui::FontDefinitions;
 use egui_winit_platform::{Platform, PlatformDescriptor};
 use std::time::Instant;
 use winit::dpi::PhysicalSize;

@@ -11,11 +11,11 @@ use egui::paint::ClippedShape;
 use egui::{CtxRef, Ui};
 use egui_winit_platform::Platform;
 use std::cell::RefCell;
-use std::mem::MaybeUninit;
 use std::rc::Rc;
 use tuple_list::tuple_list;
-use wgpu::{BindGroup, CommandEncoder, RenderPipeline, TextureView};
+use wgpu::{BindGroup, BindGroupLayout, CommandEncoder, RenderPipeline, TextureView};
 use winit::dpi::PhysicalSize;
+use winit::event::VirtualKeyCode;
 
 mod graphics;
 mod objects;
@@ -54,25 +54,42 @@ pub(crate) struct WGPU<'a> {
     pub(crate) command_encoder: &'a RefCell<CommandEncoder>,
     pub(crate) view: &'a TextureView,
     pub(crate) render_pipelines: &'a [Option<RenderPipeline>],
-    pub(crate) uniforms: &'a [MaybeUninit<BindGroup>],
-    pub(crate) current_uniforms: &'a [(usize, usize)],
+    uniforms: &'a [Option<(&'static str, BindGroup, BindGroupLayout)>],
+    current_uniforms: &'a [(usize, [usize; wgpu_core::MAX_BIND_GROUPS])],
     pub(crate) renderer_index: usize,
 }
 
 impl<'a> WGPU<'a> {
-    pub(crate) fn current_render_pipeline(&'a self) -> &'a Option<RenderPipeline> {
+    pub(crate) fn current_render_pipeline(&self) -> &'a Option<RenderPipeline> {
         &self.render_pipelines[self.renderer_index]
     }
-    pub(crate) fn current_uniforms(&'a self) -> &'a [BindGroup] {
-        let (uniform_start, uniform_count) = self.current_uniforms[self.renderer_index];
-        let uninit_slice = &self.uniforms[uniform_start..(uniform_start + uniform_count)];
-        unsafe { MaybeUninit::slice_assume_init_ref(uninit_slice) }
+    pub(crate) fn current_uniforms(&self) -> impl Iterator<Item = &'a BindGroup> {
+        let (size, uniform_indices) =
+            unsafe { self.current_uniforms.get_unchecked(self.renderer_index) };
+        (0..*size).map(|i| {
+            &unsafe {
+                self.uniforms
+                    .get_unchecked(*uniform_indices.get_unchecked(i))
+                    .as_ref()
+                    .unwrap_unchecked()
+            }
+            .1
+        })
     }
 }
 
 enum ShaderAction<'a> {
-    CreatePipeline(&'static str, wgpu::VertexBufferLayout<'static>),
-    AddUniform(&'static str, u32, wgpu::ShaderStages, &'a wgpu::Buffer),
+    CreatePipeline {
+        src: &'static str,
+        layout: wgpu::VertexBufferLayout<'static>,
+        uniforms: &'a [&'static str],
+    },
+    AddUniform {
+        name: &'static str,
+        binding: u32,
+        shader_stage: wgpu::ShaderStages,
+        buffer: &'a wgpu::Buffer,
+    },
 }
 
 trait Renderer {
@@ -109,6 +126,10 @@ fn main() {
         znear: 0.1,
         zfar: 100.0,
     };
-    let renderer = WGPURenderer::new(&window, tuple_list!(model_renderer, camera));
+    let renderer = WGPURenderer::new(
+        Some(VirtualKeyCode::R),
+        &window,
+        tuple_list!(model_renderer, camera),
+    );
     window.run(renderer);
 }

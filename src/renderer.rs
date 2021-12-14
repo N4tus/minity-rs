@@ -1,6 +1,6 @@
 use crate::objects::Vertex;
 use crate::{Model, Renderer, RendererBuilder, ShaderAction, UiActions, WGPU};
-use cgmath::{EuclideanSpace, InnerSpace, Rotation, Rotation3, SquareMatrix};
+use cgmath::{InnerSpace, Rotation, Rotation3, SquareMatrix};
 use egui::{CtxRef, Ui};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -68,6 +68,7 @@ impl Renderer for ModelRenderer {
     fn render(&mut self, wgpu: WGPU) {
         if let Some(model) = &*RefCell::borrow(&*self.model) {
             let mut encoder = wgpu.command_encoder.borrow_mut();
+            let mut uniforms = wgpu.current_uniforms();
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Model Render Pass"),
                 color_attachments: &[
@@ -89,14 +90,14 @@ impl Renderer for ModelRenderer {
                 depth_stencil_attachment: None,
             });
 
-            let uniforms = wgpu.current_uniforms();
-
             // NEW!
             render_pass.set_pipeline(wgpu.current_render_pipeline().as_ref().unwrap()); // 2.
-            render_pass.set_bind_group(0, &uniforms[0], &[]);
+
+            render_pass.set_bind_group(0, uniforms.next().unwrap(), &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            render_pass.draw_indexed(0..model.indices.len() as u32, 0, 0..1); // 3.
+            render_pass.draw_indexed(0..model.indices.len() as u32, 0, 0..1);
+            // 3.
         }
     }
 
@@ -113,10 +114,11 @@ impl Renderer for ModelRenderer {
     }
 
     fn shader(&self) -> Option<ShaderAction> {
-        Some(ShaderAction::CreatePipeline(
-            "shader_src/model.wgsl",
-            Vertex::desc(),
-        ))
+        Some(ShaderAction::CreatePipeline {
+            src: "shader_src/model.wgsl",
+            layout: Vertex::desc(),
+            uniforms: &["camera"],
+        })
     }
 }
 
@@ -198,8 +200,6 @@ impl Camera {
         self.mat = OPENGL_TO_WGPU_MATRIX * proj * view;
         self.dirty = true;
     }
-
-    fn send_buffer(&self) {}
 }
 
 impl Renderer for Camera {
@@ -256,12 +256,12 @@ impl Renderer for Camera {
     }
 
     fn shader(&self) -> Option<ShaderAction> {
-        Some(ShaderAction::AddUniform(
-            "shader_src/model.wgsl",
-            0,
-            wgpu::ShaderStages::VERTEX,
-            &self.uniform,
-        ))
+        Some(ShaderAction::AddUniform {
+            name: "camera",
+            binding: 0,
+            shader_stage: wgpu::ShaderStages::VERTEX,
+            buffer: &self.uniform,
+        })
     }
 
     fn render(&mut self, wgpu: WGPU) {
