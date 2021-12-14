@@ -15,7 +15,7 @@ pub(crate) struct Vertex {
 }
 
 impl Vertex {
-    pub(crate) fn desc() -> wgpu::VertexBufferLayout<'static> {
+    pub(crate) const fn desc() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,

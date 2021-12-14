@@ -2,6 +2,7 @@
 #![feature(generic_const_exprs)]
 #![feature(maybe_uninit_array_assume_init)]
 #![feature(maybe_uninit_slice)]
+#![feature(error_type_id)]
 
 use crate::graphics::WGPURenderer;
 use crate::objects::{load_model, LoadError, Model};
@@ -81,8 +82,8 @@ impl<'a> WGPU<'a> {
 enum ShaderAction<'a> {
     CreatePipeline {
         src: &'static str,
-        layout: wgpu::VertexBufferLayout<'static>,
-        uniforms: &'a [&'static str],
+        layout: &'static [wgpu::VertexBufferLayout<'static>],
+        uniforms: &'static [&'static str],
     },
     AddUniform {
         name: &'static str,

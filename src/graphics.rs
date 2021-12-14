@@ -3,11 +3,14 @@ use egui::paint::ClippedShape;
 use egui::{CtxRef, Ui};
 use egui_wgpu_backend::{RenderPass, ScreenDescriptor};
 use egui_winit_platform::Platform;
+use std::any::TypeId;
 use std::cell::RefCell;
 use std::mem::MaybeUninit;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use tuple_list::TupleList;
-use wgpu::{BindGroup, BindGroupLayout, RenderPipeline};
+use wgpu::{BindGroup, BindGroupLayout, Error, RenderPipeline};
+use wgpu_core::pipeline::CreateShaderModuleError;
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, KeyboardInput, VirtualKeyCode, WindowEvent};
 
@@ -152,6 +155,11 @@ where
         <Renderers as TupleList>::TUPLE_LIST_SIZE],
     bind_group_association:
         [(usize, [usize; wgpu_core::MAX_BIND_GROUPS]); <Renderers as TupleList>::TUPLE_LIST_SIZE],
+    shader_creation_info: [Option<(
+        &'static str,
+        &'static [wgpu::VertexBufferLayout<'static>],
+        &'static [&'static str],
+    )>; <Renderers as TupleList>::TUPLE_LIST_SIZE],
     reload_shader_key: Option<winit::event::VirtualKeyCode>,
 }
 
@@ -170,9 +178,21 @@ where
             <Renderers as TupleList>::TUPLE_LIST_SIZE] = MaybeUninit::uninit_array();
         let mut bg: [MaybeUninit<Option<(&'static str, BindGroup, BindGroupLayout)>>;
             <Renderers as TupleList>::TUPLE_LIST_SIZE] = MaybeUninit::uninit_array();
-        for (render_pipeline, bind_group) in rp.iter_mut().zip(bg.iter_mut()) {
+        let mut shader_creation_info: [MaybeUninit<
+            Option<(
+                &'static str,
+                &'static [wgpu::VertexBufferLayout<'static>],
+                &'static [&'static str],
+            )>,
+        >; <Renderers as TupleList>::TUPLE_LIST_SIZE] = MaybeUninit::uninit_array();
+        for ((render_pipeline, bind_group), shader_creation_info) in rp
+            .iter_mut()
+            .zip(bg.iter_mut())
+            .zip(shader_creation_info.iter_mut())
+        {
             render_pipeline.write(None);
             bind_group.write(None);
+            shader_creation_info.write(None);
         }
 
         Self {
@@ -186,6 +206,7 @@ where
             bind_group_association: [(0, [0; wgpu_core::MAX_BIND_GROUPS]);
                 <Renderers as TupleList>::TUPLE_LIST_SIZE],
             reload_shader_key,
+            shader_creation_info: unsafe { MaybeUninit::array_assume_init(shader_creation_info) },
         }
     }
 
@@ -196,6 +217,121 @@ where
                 label: Some("Render Encoder"),
             })
     }
+
+    fn init_shader(&mut self) {
+        // create render pipelines
+
+        let mut render_pipelines: [MaybeUninit<Option<RenderPipeline>>;
+            <Renderers as TupleList>::TUPLE_LIST_SIZE] = MaybeUninit::uninit_array();
+        for rp in render_pipelines.iter_mut() {
+            rp.write(None);
+        }
+        let mut render_pipelines = unsafe { MaybeUninit::array_assume_init(render_pipelines) };
+        for (index, action) in self.shader_creation_info.iter().enumerate() {
+            if let Some((src, layout, uniforms)) = action {
+                match std::fs::read_to_string(src) {
+                    Ok(shader_data) => {
+                        // arming shader compilation error handler.
+                        SHADER_COMPILATION_ERROR.store(true, Ordering::Relaxed);
+                        let shader =
+                            self.state
+                                .device
+                                .create_shader_module(&wgpu::ShaderModuleDescriptor {
+                                    label: Some(src),
+                                    source: wgpu::ShaderSource::Wgsl(shader_data.into()),
+                                });
+
+                        // if false error occurred,
+                        if !SHADER_COMPILATION_ERROR.load(Ordering::Relaxed) {
+                            // disarm error handler.
+                            SHADER_COMPILATION_ERROR.store(false, Ordering::Relaxed);
+                            return;
+                        }
+
+                        let mut bind_group_layouts: [MaybeUninit<&BindGroupLayout>;
+                            wgpu_core::MAX_BIND_GROUPS] = MaybeUninit::uninit_array();
+
+                        let (uniform_size, uniform_indices) =
+                            unsafe { self.bind_group_association.get_unchecked(index) };
+
+                        for uniform_index in 0..(*uniform_size) {
+                            unsafe { bind_group_layouts.get_unchecked_mut(uniform_index) }.write(
+                                &unsafe {
+                                    self.bind_groups
+                                        .get_unchecked(
+                                            *uniform_indices.get_unchecked(uniform_index),
+                                        )
+                                        .as_ref()
+                                        .unwrap_unchecked()
+                                }
+                                .2,
+                            );
+                        }
+
+                        let bind_group_layouts = unsafe {
+                            MaybeUninit::slice_assume_init_ref(
+                                &bind_group_layouts[0..uniforms.len()],
+                            )
+                        };
+
+                        let render_pipeline_layout = self.state.device.create_pipeline_layout(
+                            &wgpu::PipelineLayoutDescriptor {
+                                label: Some(src),
+                                bind_group_layouts,
+                                push_constant_ranges: &[],
+                            },
+                        );
+                        let render_pipeline = self.state.device.create_render_pipeline(
+                            &wgpu::RenderPipelineDescriptor {
+                                label: Some(src),
+                                layout: Some(&render_pipeline_layout),
+                                vertex: wgpu::VertexState {
+                                    module: &shader,
+                                    entry_point: "vs_main", // 1.
+                                    buffers: layout,        // 2.
+                                },
+                                fragment: Some(wgpu::FragmentState {
+                                    // 3.
+                                    module: &shader,
+                                    entry_point: "fs_main",
+                                    targets: &[wgpu::ColorTargetState {
+                                        // 4.
+                                        format: self.state.config.format,
+                                        blend: Some(wgpu::BlendState::REPLACE),
+                                        write_mask: wgpu::ColorWrites::ALL,
+                                    }],
+                                }),
+                                primitive: wgpu::PrimitiveState {
+                                    topology: wgpu::PrimitiveTopology::TriangleList, // 1.
+                                    strip_index_format: None,
+                                    front_face: wgpu::FrontFace::Ccw, // 2.
+                                    cull_mode: Some(wgpu::Face::Back),
+                                    // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
+                                    polygon_mode: wgpu::PolygonMode::Fill,
+                                    // Requires Features::DEPTH_CLAMPING
+                                    clamp_depth: false,
+                                    // Requires Features::CONSERVATIVE_RASTERIZATION
+                                    conservative: false,
+                                },
+                                depth_stencil: None, // 1.
+                                multisample: wgpu::MultisampleState {
+                                    count: 1,                         // 2.
+                                    mask: !0,                         // 3.
+                                    alpha_to_coverage_enabled: false, // 4.
+                                },
+                            },
+                        );
+                        *unsafe { render_pipelines.get_unchecked_mut(index) } =
+                            Some(render_pipeline);
+                    }
+                    Err(err) => {
+                        log::error!("Error reading shader source code: {:?}", err);
+                    }
+                }
+            }
+        }
+        self.render_pipelines = render_pipelines;
+    }
 }
 
 struct State {
@@ -205,6 +341,8 @@ struct State {
     config: wgpu::SurfaceConfiguration,
     size: winit::dpi::PhysicalSize<u32>,
 }
+
+static SHADER_COMPILATION_ERROR: std::sync::atomic::AtomicBool = AtomicBool::new(false);
 
 impl State {
     // Creating some of the wgpu types requires async code
@@ -236,6 +374,24 @@ impl State {
             )
             .await
             .unwrap();
+
+        device.on_uncaptured_error(|err| {
+            let err: wgpu::Error = err;
+            if SHADER_COMPILATION_ERROR.load(Ordering::Relaxed) {
+                // armed error handler, check it validation error,
+                // and don't panic just lock and disarm handler, to signal there was an error.
+                if let wgpu::Error::ValidationError {
+                    source,
+                    description,
+                } = &err
+                {
+                    log::warn!("{}", description);
+                    SHADER_COMPILATION_ERROR.store(false, Ordering::Relaxed);
+                    return;
+                }
+            }
+            panic!("{}", err);
+        });
 
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -293,6 +449,7 @@ where
                 } = event
                 {
                     if key == pressed_key {
+                        self.init_shader();
                         return true;
                     }
                 }
@@ -389,109 +546,18 @@ where
             }
         }
 
-        // create render pipelines
-        for (index, action) in actions.iter_mut().enumerate() {
-            if matches!(action, Some(ShaderAction::CreatePipeline { .. })) {
-                let action = unsafe { action.take().unwrap_unchecked() };
-                if let ShaderAction::CreatePipeline {
-                    src,
-                    layout,
-                    uniforms,
-                } = action
-                {
-                    match std::fs::read_to_string(src) {
-                        Ok(shader_data) => {
-                            let shader = self.state.device.create_shader_module(
-                                &wgpu::ShaderModuleDescriptor {
-                                    label: Some(src),
-                                    source: wgpu::ShaderSource::Wgsl(shader_data.into()),
-                                },
-                            );
-
-                            let mut bind_group_layouts: [MaybeUninit<&BindGroupLayout>;
-                                wgpu_core::MAX_BIND_GROUPS] = MaybeUninit::uninit_array();
-
-                            let (uniform_size, uniform_indices) =
-                                unsafe { self.bind_group_association.get_unchecked(index) };
-
-                            for uniform_index in 0..(*uniform_size) {
-                                unsafe { bind_group_layouts.get_unchecked_mut(uniform_index) }
-                                    .write(
-                                        &unsafe {
-                                            self.bind_groups
-                                                .get_unchecked(
-                                                    *uniform_indices.get_unchecked(uniform_index),
-                                                )
-                                                .as_ref()
-                                                .unwrap_unchecked()
-                                        }
-                                        .2,
-                                    );
-                            }
-
-                            let bind_group_layouts = unsafe {
-                                MaybeUninit::slice_assume_init_ref(
-                                    &bind_group_layouts[0..uniforms.len()],
-                                )
-                            };
-
-                            let render_pipeline_layout = self.state.device.create_pipeline_layout(
-                                &wgpu::PipelineLayoutDescriptor {
-                                    label: Some(src),
-                                    bind_group_layouts,
-                                    push_constant_ranges: &[],
-                                },
-                            );
-                            let render_pipeline = self.state.device.create_render_pipeline(
-                                &wgpu::RenderPipelineDescriptor {
-                                    label: Some(src),
-                                    layout: Some(&render_pipeline_layout),
-                                    vertex: wgpu::VertexState {
-                                        module: &shader,
-                                        entry_point: "vs_main", // 1.
-                                        buffers: &[layout],     // 2.
-                                    },
-                                    fragment: Some(wgpu::FragmentState {
-                                        // 3.
-                                        module: &shader,
-                                        entry_point: "fs_main",
-                                        targets: &[wgpu::ColorTargetState {
-                                            // 4.
-                                            format: self.state.config.format,
-                                            blend: Some(wgpu::BlendState::REPLACE),
-                                            write_mask: wgpu::ColorWrites::ALL,
-                                        }],
-                                    }),
-                                    primitive: wgpu::PrimitiveState {
-                                        topology: wgpu::PrimitiveTopology::TriangleList, // 1.
-                                        strip_index_format: None,
-                                        front_face: wgpu::FrontFace::Ccw, // 2.
-                                        cull_mode: Some(wgpu::Face::Back),
-                                        // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
-                                        polygon_mode: wgpu::PolygonMode::Fill,
-                                        // Requires Features::DEPTH_CLAMPING
-                                        clamp_depth: false,
-                                        // Requires Features::CONSERVATIVE_RASTERIZATION
-                                        conservative: false,
-                                    },
-                                    depth_stencil: None, // 1.
-                                    multisample: wgpu::MultisampleState {
-                                        count: 1,                         // 2.
-                                        mask: !0,                         // 3.
-                                        alpha_to_coverage_enabled: false, // 4.
-                                    },
-                                },
-                            );
-                            *unsafe { self.render_pipelines.get_unchecked_mut(index) } =
-                                Some(render_pipeline);
-                        }
-                        Err(err) => {
-                            log::error!("Error reading shader source code: {:?}", err);
-                        }
-                    }
-                }
+        for (i, action) in actions.into_iter().enumerate() {
+            if let Some(ShaderAction::CreatePipeline {
+                src,
+                layout,
+                uniforms,
+            }) = action
+            {
+                *unsafe { self.shader_creation_info.get_unchecked_mut(i) } =
+                    Some((src, layout, uniforms));
             }
         }
+        self.init_shader();
     }
 
     fn render(

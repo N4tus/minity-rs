@@ -5,7 +5,7 @@ use egui::{CtxRef, Ui};
 use std::cell::RefCell;
 use std::rc::Rc;
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
-use wgpu::BufferUsages;
+use wgpu::{BufferUsages, VertexBufferLayout};
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 
@@ -116,11 +116,13 @@ impl Renderer for ModelRenderer {
     fn shader(&self) -> Option<ShaderAction> {
         Some(ShaderAction::CreatePipeline {
             src: "shader_src/model.wgsl",
-            layout: Vertex::desc(),
+            layout: VERTEX_LAYOUT,
             uniforms: &["camera"],
         })
     }
 }
+
+const VERTEX_LAYOUT: &[VertexBufferLayout<'static>] = &[Vertex::desc()];
 
 pub(crate) struct CameraBuilder {
     pub(crate) eye: cgmath::Point3<f32>,
@@ -203,6 +205,17 @@ impl Camera {
 }
 
 impl Renderer for Camera {
+    fn render(&mut self, wgpu: WGPU) {
+        if self.dirty {
+            self.dirty = false;
+            wgpu.queue.write_buffer(
+                &self.uniform,
+                0,
+                bytemuck::cast_slice::<[[f32; 4]; 4], u8>(&[self.mat.into()]),
+            );
+        }
+    }
+
     fn input(&mut self, event: &WindowEvent) -> bool {
         match event {
             WindowEvent::MouseInput {
@@ -221,8 +234,10 @@ impl Renderer for Camera {
                     let rot_axis = self.x_axis * dir.y + self.y_axis * dir.x;
 
                     let rot_angle = dir.magnitude() / 2.0;
-                    let qrot =
-                        cgmath::Quaternion::from_axis_angle(rot_axis, cgmath::Deg(rot_angle));
+                    let qrot = cgmath::Quaternion::from_axis_angle(
+                        rot_axis.normalize(),
+                        cgmath::Deg(rot_angle),
+                    );
 
                     self.eye = qrot.rotate_point(self.eye);
                     self.up = qrot.rotate_vector(self.up);
@@ -262,17 +277,6 @@ impl Renderer for Camera {
             shader_stage: wgpu::ShaderStages::VERTEX,
             buffer: &self.uniform,
         })
-    }
-
-    fn render(&mut self, wgpu: WGPU) {
-        if self.dirty {
-            self.dirty = false;
-            wgpu.queue.write_buffer(
-                &self.uniform,
-                0,
-                bytemuck::cast_slice::<[[f32; 4]; 4], u8>(&[self.mat.into()]),
-            );
-        }
     }
 
     fn resize(&mut self, size: PhysicalSize<u32>) {
