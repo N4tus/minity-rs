@@ -2,8 +2,6 @@ use crate::objects::Vertex;
 use crate::{Model, Renderer, RendererBuilder, ShaderAction, UiActions, WGPU};
 use cgmath::{InnerSpace, Rotation, Rotation3, SquareMatrix};
 use egui::{CtxRef, Ui};
-use std::cell::RefCell;
-use std::rc::Rc;
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::{BufferUsages, VertexBufferLayout};
 use winit::dpi::PhysicalSize;
@@ -11,31 +9,24 @@ use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 
 mod shader;
 
-type ModelData = Rc<RefCell<Option<Model>>>;
-
 pub(crate) struct ModelRenderer {
-    model: ModelData,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
 }
 
-pub(crate) struct ModelRendererBuilder {
-    model: ModelData,
-}
+pub(crate) struct ModelRendererBuilder;
 
-impl ModelRendererBuilder {
-    pub(crate) fn new(model: ModelData) -> Self {
-        Self { model }
-    }
-}
-
-impl RendererBuilder for ModelRendererBuilder {
+impl RendererBuilder<Option<Model>> for ModelRendererBuilder {
     type Output = ModelRenderer;
 
-    fn build(self, device: &wgpu::Device, _size: PhysicalSize<u32>) -> Self::Output {
+    fn build(
+        self,
+        data: &mut Option<Model>,
+        device: &wgpu::Device,
+        _size: PhysicalSize<u32>,
+    ) -> Self::Output {
         let (vertex_buffer, index_buffer) = {
-            let model = RefCell::borrow(&*self.model);
-            let (data, indices) = if let Some(m) = &*model {
+            let (data, indices) = if let Some(m) = data {
                 (
                     bytemuck::cast_slice(m.vertices.as_slice()),
                     bytemuck::cast_slice(m.indices.as_slice()),
@@ -57,16 +48,15 @@ impl RendererBuilder for ModelRendererBuilder {
             )
         };
         Self::Output {
-            model: self.model,
             vertex_buffer,
             index_buffer,
         }
     }
 }
 
-impl Renderer for ModelRenderer {
-    fn render(&mut self, wgpu: WGPU) {
-        if let Some(model) = &*RefCell::borrow(&*self.model) {
+impl Renderer<Option<Model>> for ModelRenderer {
+    fn render(&mut self, data: &mut Option<Model>, wgpu: WGPU) {
+        if let Some(model) = data {
             let mut encoder = wgpu.command_encoder.borrow_mut();
             let mut uniforms = wgpu.current_uniforms();
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -101,7 +91,13 @@ impl Renderer for ModelRenderer {
         }
     }
 
-    fn render_ui(&mut self, _ctx: &CtxRef, menu_ui: &mut Ui, actions: &mut UiActions) {
+    fn render_ui(
+        &mut self,
+        _data: &mut Option<Model>,
+        _ctx: &CtxRef,
+        menu_ui: &mut Ui,
+        actions: &mut UiActions,
+    ) {
         egui::menu::menu(menu_ui, "Config", |ui| {
             if ui.button("Quit").clicked() {
                 actions.quit = true;
@@ -109,11 +105,7 @@ impl Renderer for ModelRenderer {
         });
     }
 
-    fn input(&mut self, _event: &WindowEvent) -> bool {
-        false
-    }
-
-    fn shader(&self) -> Option<ShaderAction> {
+    fn shader(&self, _data: &mut Option<Model>) -> Option<ShaderAction> {
         Some(ShaderAction::CreatePipeline {
             src: "shader_src/model.wgsl",
             layout: VERTEX_LAYOUT,
@@ -159,10 +151,15 @@ pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::new(
     0.0, 0.0, 0.5, 1.0,
 );
 
-impl RendererBuilder for CameraBuilder {
+impl RendererBuilder<Option<Model>> for CameraBuilder {
     type Output = Camera;
 
-    fn build(self, device: &wgpu::Device, size: PhysicalSize<u32>) -> Self::Output {
+    fn build(
+        self,
+        _data: &mut Option<Model>,
+        device: &wgpu::Device,
+        size: PhysicalSize<u32>,
+    ) -> Self::Output {
         let aspect = size.width as f32 / size.height as f32;
         let view = cgmath::Matrix4::look_at_rh(self.eye, self.target, cgmath::Vector3::unit_y());
         let proj = cgmath::perspective(cgmath::Deg(self.fovy), aspect, self.znear, self.zfar);
@@ -204,8 +201,8 @@ impl Camera {
     }
 }
 
-impl Renderer for Camera {
-    fn render(&mut self, wgpu: WGPU) {
+impl Renderer<Option<Model>> for Camera {
+    fn render(&mut self, _data: &mut Option<Model>, wgpu: WGPU) {
         if self.dirty {
             self.dirty = false;
             wgpu.queue.write_buffer(
@@ -216,7 +213,7 @@ impl Renderer for Camera {
         }
     }
 
-    fn input(&mut self, event: &WindowEvent) -> bool {
+    fn input(&mut self, _data: &mut Option<Model>, event: &WindowEvent) -> bool {
         match event {
             WindowEvent::MouseInput {
                 state,
@@ -270,7 +267,7 @@ impl Renderer for Camera {
         }
     }
 
-    fn shader(&self) -> Option<ShaderAction> {
+    fn shader(&self, _data: &mut Option<Model>) -> Option<ShaderAction> {
         Some(ShaderAction::AddUniform {
             name: "camera",
             binding: 0,
@@ -279,7 +276,7 @@ impl Renderer for Camera {
         })
     }
 
-    fn resize(&mut self, size: PhysicalSize<u32>) {
+    fn resize(&mut self, _data: &mut Option<Model>, size: PhysicalSize<u32>) {
         self.aspect = size.width as f32 / size.height as f32;
         self.update_camera();
     }

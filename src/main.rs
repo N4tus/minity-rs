@@ -2,7 +2,7 @@
 #![feature(generic_const_exprs)]
 #![feature(maybe_uninit_array_assume_init)]
 #![feature(maybe_uninit_slice)]
-#![feature(error_type_id)]
+#![feature(negative_impls)]
 
 use crate::graphics::WGPURenderer;
 use crate::objects::{load_model, LoadError, Model};
@@ -12,7 +12,6 @@ use egui::paint::ClippedShape;
 use egui::{CtxRef, Ui};
 use egui_winit_platform::Platform;
 use std::cell::RefCell;
-use std::rc::Rc;
 use tuple_list::tuple_list;
 use wgpu::{BindGroup, BindGroupLayout, CommandEncoder, RenderPipeline, TextureView};
 use winit::dpi::PhysicalSize;
@@ -43,9 +42,10 @@ struct UiActions {
     quit: bool,
 }
 
-trait RendererBuilder {
-    type Output: Renderer;
-    fn build(self, device: &wgpu::Device, size: PhysicalSize<u32>) -> Self::Output;
+trait RendererBuilder<Data> {
+    type Output: Renderer<Data>;
+    fn build(self, data: &mut Data, device: &wgpu::Device, size: PhysicalSize<u32>)
+        -> Self::Output;
 }
 
 #[allow(clippy::upper_case_acronyms)]
@@ -93,16 +93,35 @@ enum ShaderAction<'a> {
     },
 }
 
-trait Renderer {
-    fn render(&mut self, _wgpu: WGPU) {}
-    fn render_ui(&mut self, _ctx: &CtxRef, _menu_ui: &mut Ui, _actions: &mut UiActions) {}
-    fn input(&mut self, _event: &winit::event::WindowEvent) -> bool {
+trait Renderer<Data> {
+    /// do never override this method
+    fn visit<'a>(
+        &'a self,
+        data: &mut Data,
+        actions: &mut [Option<ShaderAction<'a>>],
+        index: usize,
+    ) {
+        let s = self.shader(data);
+        if s.is_some() {
+            *unsafe { actions.get_unchecked_mut(index) } = s;
+        }
+    }
+    fn render(&mut self, _data: &mut Data, _wgpu: WGPU) {}
+    fn render_ui(
+        &mut self,
+        _data: &mut Data,
+        _ctx: &CtxRef,
+        _menu_ui: &mut Ui,
+        _actions: &mut UiActions,
+    ) {
+    }
+    fn input(&mut self, _data: &mut Data, _event: &winit::event::WindowEvent) -> bool {
         false
     }
-    fn shader(&self) -> Option<ShaderAction> {
+    fn shader(&self, _data: &mut Data) -> Option<ShaderAction> {
         None
     }
-    fn resize(&mut self, _size: PhysicalSize<u32>) {}
+    fn resize(&mut self, _data: &mut Data, _size: PhysicalSize<u32>) {}
 }
 
 fn main() {
@@ -119,7 +138,7 @@ fn main() {
         Ok(m) => model = Some(m),
     }
     let window = Window::new();
-    let model_renderer = ModelRendererBuilder::new(Rc::new(RefCell::new(model)));
+    let model_renderer = ModelRendererBuilder;
     let camera = CameraBuilder {
         eye: (0.0, 1.0, 2.0).into(),
         target: (0.0, 0.0, 0.0).into(),
@@ -128,6 +147,7 @@ fn main() {
         zfar: 100.0,
     };
     let renderer = WGPURenderer::new(
+        model,
         Some(VirtualKeyCode::R),
         &window,
         tuple_list!(model_renderer, camera),

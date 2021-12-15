@@ -3,145 +3,95 @@ use egui::paint::ClippedShape;
 use egui::{CtxRef, Ui};
 use egui_wgpu_backend::{RenderPass, ScreenDescriptor};
 use egui_winit_platform::Platform;
-use std::any::TypeId;
 use std::cell::RefCell;
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use tuple_list::TupleList;
-use wgpu::{BindGroup, BindGroupLayout, Error, RenderPipeline};
-use wgpu_core::pipeline::CreateShaderModuleError;
+use wgpu::{BindGroup, BindGroupLayout, RenderPipeline};
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, KeyboardInput, VirtualKeyCode, WindowEvent};
 
-pub(crate) trait RendererBuilderImpl {
-    type Output: RendererExt;
-
-    fn build_impl(
-        self,
-        device: &wgpu::Device,
-        size: PhysicalSize<u32>,
-        index: usize,
-    ) -> Self::Output;
-}
-
-pub(crate) trait RendererExt {
-    fn visit<'a>(&'a self, actions: &mut [Option<ShaderAction<'a>>], index: usize);
-    fn render(&mut self, _wgpu: WGPU) {}
-    fn render_ui(&mut self, _ctx: &CtxRef, _menu_ui: &mut Ui, _actions: &mut UiActions) {}
-    fn input(&mut self, _event: &winit::event::WindowEvent) -> bool {
-        false
-    }
-    fn resize(&mut self, _size: PhysicalSize<u32>) {}
-}
-
-impl RendererBuilderImpl for () {
+impl<Data> RendererBuilder<Data> for () {
     type Output = ();
 
-    fn build_impl(
+    fn build(
         self,
+        _data: &mut Data,
         _device: &wgpu::Device,
         _size: PhysicalSize<u32>,
-        _index: usize,
     ) -> Self::Output {
     }
 }
 
-impl RendererExt for () {
-    fn visit<'a>(&'a self, _actions: &mut [Option<ShaderAction<'a>>], _index: usize) {}
-}
+impl<Data> Renderer<Data> for () {}
 
-impl<Head, Tail> RendererExt for (Head, Tail)
+impl<Data, Head, Tail> Renderer<Data> for (Head, Tail)
 where
-    Head: RendererExt,
-    Tail: RendererExt + TupleList,
+    Head: Renderer<Data>,
+    Tail: Renderer<Data> + TupleList,
 {
-    fn visit<'a>(&'a self, actions: &mut [Option<ShaderAction<'a>>], index: usize) {
-        self.0.visit(actions, index);
-        self.1.visit(actions, index + 1);
+    fn visit<'a>(
+        &'a self,
+        data: &mut Data,
+        actions: &mut [Option<ShaderAction<'a>>],
+        index: usize,
+    ) {
+        self.0.visit(data, actions, index);
+        self.1.visit(data, actions, index + 1);
     }
 
-    fn render(&mut self, mut wgpu: WGPU) {
-        self.0.render(wgpu.clone());
+    fn render(&mut self, data: &mut Data, mut wgpu: WGPU) {
+        self.0.render(data, wgpu.clone());
         wgpu.renderer_index += 1;
-        self.1.render(wgpu);
+        self.1.render(data, wgpu);
     }
 
-    fn render_ui(&mut self, ctx: &CtxRef, menu_ui: &mut Ui, actions: &mut UiActions) {
-        self.0.render_ui(ctx, menu_ui, actions);
-        self.1.render_ui(ctx, menu_ui, actions);
+    fn render_ui(
+        &mut self,
+        data: &mut Data,
+        ctx: &CtxRef,
+        menu_ui: &mut Ui,
+        actions: &mut UiActions,
+    ) {
+        self.0.render_ui(data, ctx, menu_ui, actions);
+        self.1.render_ui(data, ctx, menu_ui, actions);
     }
 
-    fn input(&mut self, event: &WindowEvent) -> bool {
-        let l = self.0.input(event);
-        let r = self.1.input(event);
+    fn input(&mut self, data: &mut Data, event: &WindowEvent) -> bool {
+        let l = self.0.input(data, event);
+        let r = self.1.input(data, event);
         l || r
     }
 
-    fn resize(&mut self, size: PhysicalSize<u32>) {
-        self.0.resize(size);
-        self.1.resize(size);
+    fn resize(&mut self, data: &mut Data, size: PhysicalSize<u32>) {
+        self.0.resize(data, size);
+        self.1.resize(data, size);
     }
 }
 
-impl<Head, Tail> RendererBuilderImpl for (Head, Tail)
+impl<Data, Head, Tail> RendererBuilder<Data> for (Head, Tail)
 where
-    Head: RendererBuilderImpl,
-    Tail: RendererBuilderImpl + TupleList,
-    <Tail as RendererBuilderImpl>::Output: TupleList,
+    Head: RendererBuilder<Data>,
+    Tail: RendererBuilder<Data> + TupleList,
+    <Tail as RendererBuilder<Data>>::Output: TupleList,
 {
     type Output = (Head::Output, Tail::Output);
 
-    fn build_impl(
+    fn build(
         self,
+        data: &mut Data,
         device: &wgpu::Device,
         size: PhysicalSize<u32>,
-        index: usize,
     ) -> Self::Output {
-        let head_output = self.0.build_impl(device, size, index);
-        (head_output, self.1.build_impl(device, size, index + 1))
+        (
+            self.0.build(data, device, size),
+            self.1.build(data, device, size),
+        )
     }
 }
 
-impl<R: Renderer> RendererExt for R {
-    fn visit<'a>(&'a self, actions: &mut [Option<ShaderAction<'a>>], index: usize) {
-        let s = self.shader();
-        if s.is_some() {
-            *unsafe { actions.get_unchecked_mut(index) } = s;
-        }
-    }
-
-    fn render(&mut self, wgpu: WGPU) {
-        Renderer::render(self, wgpu);
-    }
-
-    fn render_ui(&mut self, ctx: &CtxRef, menu_ui: &mut Ui, actions: &mut UiActions) {
-        Renderer::render_ui(self, ctx, menu_ui, actions);
-    }
-
-    fn input(&mut self, event: &WindowEvent) -> bool {
-        Renderer::input(self, event)
-    }
-
-    fn resize(&mut self, size: PhysicalSize<u32>) {
-        Renderer::resize(self, size);
-    }
-}
-
-impl<R: RendererBuilder> RendererBuilderImpl for R {
-    type Output = <R as RendererBuilder>::Output;
-
-    fn build_impl(
-        self,
-        device: &wgpu::Device,
-        size: PhysicalSize<u32>,
-        _index: usize,
-    ) -> Self::Output {
-        self.build(device, size)
-    }
-}
-
-pub(crate) struct WGPURenderer<Renderers: RendererBuilderImpl + TupleList>
+pub(crate) struct WGPURenderer<Data: 'static, Renderers: RendererBuilder<Data> + TupleList>
 where
     [(); <Renderers as TupleList>::TUPLE_LIST_SIZE]:,
 {
@@ -151,40 +101,49 @@ where
     renderer_builders: Option<Renderers>,
     renderers: Option<Renderers::Output>,
     render_pipelines: [Option<RenderPipeline>; <Renderers as TupleList>::TUPLE_LIST_SIZE],
+    #[allow(clippy::type_complexity)]
     bind_groups: [Option<(&'static str, BindGroup, BindGroupLayout)>;
         <Renderers as TupleList>::TUPLE_LIST_SIZE],
+    #[allow(clippy::type_complexity)]
     bind_group_association:
         [(usize, [usize; wgpu_core::MAX_BIND_GROUPS]); <Renderers as TupleList>::TUPLE_LIST_SIZE],
+    #[allow(clippy::type_complexity)]
     shader_creation_info: [Option<(
         &'static str,
         &'static [wgpu::VertexBufferLayout<'static>],
         &'static [&'static str],
     )>; <Renderers as TupleList>::TUPLE_LIST_SIZE],
     reload_shader_key: Option<winit::event::VirtualKeyCode>,
+    data: Data,
 }
 
-impl<Renderers: RendererBuilderImpl + TupleList> WGPURenderer<Renderers>
+impl<Data: 'static, Renderers: RendererBuilder<Data> + TupleList> WGPURenderer<Data, Renderers>
 where
     [(); <Renderers as TupleList>::TUPLE_LIST_SIZE]:,
 {
     pub(crate) fn new(
+        data: Data,
         reload_shader_key: Option<VirtualKeyCode>,
         window: &Window,
         renderers: Renderers,
     ) -> Self {
         let state = pollster::block_on(State::new(window));
         let egui_rpass = RenderPass::new(&state.device, state.config.format, 1);
+        #[allow(clippy::type_complexity)]
         let mut rp: [MaybeUninit<Option<RenderPipeline>>;
             <Renderers as TupleList>::TUPLE_LIST_SIZE] = MaybeUninit::uninit_array();
+        #[allow(clippy::type_complexity)]
         let mut bg: [MaybeUninit<Option<(&'static str, BindGroup, BindGroupLayout)>>;
             <Renderers as TupleList>::TUPLE_LIST_SIZE] = MaybeUninit::uninit_array();
+        #[allow(clippy::type_complexity)]
         let mut shader_creation_info: [MaybeUninit<
             Option<(
                 &'static str,
                 &'static [wgpu::VertexBufferLayout<'static>],
                 &'static [&'static str],
             )>,
-        >; <Renderers as TupleList>::TUPLE_LIST_SIZE] = MaybeUninit::uninit_array();
+        >;
+            <Renderers as TupleList>::TUPLE_LIST_SIZE] = MaybeUninit::uninit_array();
         for ((render_pipeline, bind_group), shader_creation_info) in rp
             .iter_mut()
             .zip(bg.iter_mut())
@@ -196,6 +155,7 @@ where
         }
 
         Self {
+            data,
             state,
             egui_rpass,
             previous_frame_time: None,
@@ -226,6 +186,7 @@ where
         for rp in render_pipelines.iter_mut() {
             rp.write(None);
         }
+        let mut pipeline_count = 0_usize;
         let mut render_pipelines = unsafe { MaybeUninit::array_assume_init(render_pipelines) };
         for (index, action) in self.shader_creation_info.iter().enumerate() {
             if let Some((src, layout, uniforms)) = action {
@@ -321,6 +282,7 @@ where
                                 },
                             },
                         );
+                        pipeline_count += 1;
                         *unsafe { render_pipelines.get_unchecked_mut(index) } =
                             Some(render_pipeline);
                     }
@@ -330,6 +292,8 @@ where
                 }
             }
         }
+
+        log::info!("created {} pipelines", pipeline_count);
         self.render_pipelines = render_pipelines;
     }
 }
@@ -380,11 +344,7 @@ impl State {
             if SHADER_COMPILATION_ERROR.load(Ordering::Relaxed) {
                 // armed error handler, check it validation error,
                 // and don't panic just lock and disarm handler, to signal there was an error.
-                if let wgpu::Error::ValidationError {
-                    source,
-                    description,
-                } = &err
-                {
+                if let wgpu::Error::ValidationError { description, .. } = &err {
                     log::warn!("{}", description);
                     SHADER_COMPILATION_ERROR.store(false, Ordering::Relaxed);
                     return;
@@ -411,7 +371,8 @@ impl State {
     }
 }
 
-impl<Renderers: RendererBuilderImpl + TupleList> RenderBackend for WGPURenderer<Renderers>
+impl<Data, Renderers: RendererBuilder<Data> + TupleList> RenderBackend
+    for WGPURenderer<Data, Renderers>
 where
     [(); <Renderers as TupleList>::TUPLE_LIST_SIZE]:,
 {
@@ -426,7 +387,7 @@ where
             .surface
             .configure(&self.state.device, &self.state.config);
         if let Some(renderers) = &mut self.renderers {
-            renderers.resize(new_size);
+            renderers.resize(&mut self.data, new_size);
         }
     }
 
@@ -435,7 +396,7 @@ where
             .renderers
             .as_mut()
             .expect("WGPURenderer::renderers was None in input")
-            .input(event);
+            .input(&mut self.data, event);
         if !handled {
             if let Some(key) = &self.reload_shader_key {
                 if let WindowEvent::KeyboardInput {
@@ -471,10 +432,14 @@ where
             self.renderer_builders
                 .take()
                 .expect("WGPURenderer::renderer_builder was None on init")
-                .build_impl(&self.state.device, self.state.size, 0),
+                .build(&mut self.data, &self.state.device, self.state.size),
         );
 
-        unsafe { self.renderers.as_ref().unwrap_unchecked() }.visit(&mut actions, 0);
+        unsafe { self.renderers.as_ref().unwrap_unchecked() }.visit(
+            &mut self.data,
+            &mut actions,
+            0,
+        );
 
         // gather uniform bind groups
         for (index, action) in actions.iter_mut().enumerate() {
@@ -585,19 +550,22 @@ where
             .expect("WGPURenderer::renderers was None in render");
         egui::TopBottomPanel::top("menu").show(&ctx, |ui| {
             egui::menu::bar(ui, |ui| {
-                renderers.render_ui(&ctx, ui, &mut actions);
+                renderers.render_ui(&mut self.data, &ctx, ui, &mut actions);
             });
         });
 
-        renderers.render(WGPU {
-            queue: &self.state.queue,
-            command_encoder: &encoder,
-            view: &view,
-            render_pipelines: &self.render_pipelines,
-            uniforms: &self.bind_groups,
-            current_uniforms: &self.bind_group_association,
-            renderer_index: 0,
-        });
+        renderers.render(
+            &mut self.data,
+            WGPU {
+                queue: &self.state.queue,
+                command_encoder: &encoder,
+                view: &view,
+                render_pipelines: &self.render_pipelines,
+                uniforms: &self.bind_groups,
+                current_uniforms: &self.bind_group_association,
+                renderer_index: 0,
+            },
+        );
 
         let paint_commands = end_frame(platform);
         let paint_jobs = platform.context().tessellate(paint_commands);
