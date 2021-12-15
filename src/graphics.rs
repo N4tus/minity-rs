@@ -1,5 +1,5 @@
 use crate::{RenderBackend, Renderer, RendererBuilder, ShaderAction, UiActions, Window, WGPU};
-use egui::paint::ClippedShape;
+use egui::epaint::ClippedShape;
 use egui::{CtxRef, Ui};
 use egui_wgpu_backend::{RenderPass, ScreenDescriptor};
 use egui_winit_platform::Platform;
@@ -112,6 +112,7 @@ where
         &'static str,
         &'static [wgpu::VertexBufferLayout<'static>],
         &'static [&'static str],
+        wgpu::PrimitiveTopology,
     )>; <Renderers as TupleList>::TUPLE_LIST_SIZE],
     reload_shader_key: Option<winit::event::VirtualKeyCode>,
     data: Data,
@@ -141,6 +142,7 @@ where
                 &'static str,
                 &'static [wgpu::VertexBufferLayout<'static>],
                 &'static [&'static str],
+                wgpu::PrimitiveTopology,
             )>,
         >;
             <Renderers as TupleList>::TUPLE_LIST_SIZE] = MaybeUninit::uninit_array();
@@ -189,7 +191,7 @@ where
         let mut pipeline_count = 0_usize;
         let mut render_pipelines = unsafe { MaybeUninit::array_assume_init(render_pipelines) };
         for (index, action) in self.shader_creation_info.iter().enumerate() {
-            if let Some((src, layout, uniforms)) = action {
+            if let Some((src, layout, uniforms, topology)) = action {
                 match std::fs::read_to_string(src) {
                     Ok(shader_data) => {
                         // arming shader compilation error handler.
@@ -263,7 +265,7 @@ where
                                     }],
                                 }),
                                 primitive: wgpu::PrimitiveState {
-                                    topology: wgpu::PrimitiveTopology::TriangleList, // 1.
+                                    topology: *topology, // 1.
                                     strip_index_format: None,
                                     front_face: wgpu::FrontFace::Ccw, // 2.
                                     cull_mode: Some(wgpu::Face::Back),
@@ -287,7 +289,7 @@ where
                             Some(render_pipeline);
                     }
                     Err(err) => {
-                        log::error!("Error reading shader source code: {:?}", err);
+                        log::error!("Error reading shader source code from `{}`: {}", src, err);
                     }
                 }
             }
@@ -419,7 +421,13 @@ where
         handled
     }
 
-    fn update(&mut self) {}
+    fn update(&mut self) {
+        let renderers = self
+            .renderers
+            .as_mut()
+            .expect("WGPURenderer::renderers was None in render");
+        renderers.update(&mut self.data);
+    }
 
     fn init(&mut self) {
         let mut actions: [MaybeUninit<Option<ShaderAction>>;
@@ -442,21 +450,26 @@ where
         );
 
         // gather uniform bind groups
-        for (index, action) in actions.iter_mut().enumerate() {
-            if matches!(action, Some(ShaderAction::AddUniform { .. })) {
-                let action = unsafe { action.take().unwrap_unchecked() };
-                if let ShaderAction::AddUniform {
+        for (index, action) in actions.iter().enumerate() {
+            match action {
+                Some(ShaderAction::AddUniform {
                     name,
                     binding,
                     shader_stage,
                     buffer,
-                } = action
-                {
+                })
+                | Some(ShaderAction::CreateShaderWithUniform {
+                    name,
+                    binding,
+                    shader_stage,
+                    buffer,
+                    ..
+                }) => {
                     let bind_group_layout = self.state.device.create_bind_group_layout(
                         &wgpu::BindGroupLayoutDescriptor {
                             entries: &[wgpu::BindGroupLayoutEntry {
-                                binding,
-                                visibility: shader_stage,
+                                binding: *binding,
+                                visibility: *shader_stage,
                                 ty: wgpu::BindingType::Buffer {
                                     ty: wgpu::BufferBindingType::Uniform,
                                     has_dynamic_offset: false,
@@ -464,7 +477,7 @@ where
                                 },
                                 count: None,
                             }],
-                            label: Some(name),
+                            label: Some(*name),
                         },
                     );
                     let bind_group =
@@ -473,41 +486,46 @@ where
                             .create_bind_group(&wgpu::BindGroupDescriptor {
                                 layout: &bind_group_layout,
                                 entries: &[wgpu::BindGroupEntry {
-                                    binding,
+                                    binding: *binding,
                                     resource: buffer.as_entire_binding(),
                                 }],
-                                label: Some(name),
+                                label: Some(*name),
                             });
                     *unsafe { self.bind_groups.get_unchecked_mut(index) } =
-                        Some((name, bind_group, bind_group_layout));
+                        Some((*name, bind_group, bind_group_layout));
                 }
+                _ => {}
             }
         }
 
         // resolve uniform bind groups
         for (index, action) in actions.iter().enumerate() {
-            if let Some(ShaderAction::CreatePipeline { uniforms, .. }) = action {
-                if uniforms.len() > wgpu_core::MAX_BIND_GROUPS {
-                    panic!(
-                        "Cannot have more than {} bind groups per shader",
-                        wgpu_core::MAX_BIND_GROUPS
-                    );
-                }
-                let mut uniform_indices = [0_usize; wgpu_core::MAX_BIND_GROUPS];
-                let mut uniform_size = 0_usize;
-                for &uniform_name in *uniforms {
-                    for (uniform_index, uniform) in self.bind_groups.iter().enumerate() {
-                        if let Some((name, _, _)) = uniform {
-                            if uniform_name == *name {
-                                *unsafe { uniform_indices.get_unchecked_mut(uniform_size) } =
-                                    uniform_index;
-                                uniform_size += 1;
+            match action {
+                Some(ShaderAction::CreatePipeline { uniforms, .. })
+                | Some(ShaderAction::CreateShaderWithUniform { uniforms, .. }) => {
+                    if uniforms.len() > wgpu_core::MAX_BIND_GROUPS {
+                        panic!(
+                            "Cannot have more than {} bind groups per shader",
+                            wgpu_core::MAX_BIND_GROUPS
+                        );
+                    }
+                    let mut uniform_indices = [0_usize; wgpu_core::MAX_BIND_GROUPS];
+                    let mut uniform_size = 0_usize;
+                    for &uniform_name in *uniforms {
+                        for (uniform_index, uniform) in self.bind_groups.iter().enumerate() {
+                            if let Some((name, _, _)) = uniform {
+                                if uniform_name == *name {
+                                    *unsafe { uniform_indices.get_unchecked_mut(uniform_size) } =
+                                        uniform_index;
+                                    uniform_size += 1;
+                                }
                             }
                         }
                     }
+                    *unsafe { self.bind_group_association.get_unchecked_mut(index) } =
+                        (uniforms.len(), uniform_indices);
                 }
-                *unsafe { self.bind_group_association.get_unchecked_mut(index) } =
-                    (uniforms.len(), uniform_indices);
+                _ => {}
             }
         }
 
@@ -516,10 +534,18 @@ where
                 src,
                 layout,
                 uniforms,
+                topology,
+            })
+            | Some(ShaderAction::CreateShaderWithUniform {
+                src,
+                layout,
+                uniforms,
+                topology,
+                ..
             }) = action
             {
                 *unsafe { self.shader_creation_info.get_unchecked_mut(i) } =
-                    Some((src, layout, uniforms));
+                    Some((src, layout, uniforms, topology));
             }
         }
         self.init_shader();

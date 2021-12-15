@@ -6,14 +6,15 @@
 
 use crate::graphics::WGPURenderer;
 use crate::objects::{load_model, LoadError, Model};
-use crate::renderer::{CameraBuilder, ModelRendererBuilder};
+use crate::renderer::{CameraBuilder, LightRendererBuilder, ModelRendererBuilder};
 use crate::window::Window;
-use egui::paint::ClippedShape;
+use cgmath::SquareMatrix;
+use egui::epaint::ClippedShape;
 use egui::{CtxRef, Ui};
 use egui_winit_platform::Platform;
 use std::cell::RefCell;
 use tuple_list::tuple_list;
-use wgpu::{BindGroup, BindGroupLayout, CommandEncoder, RenderPipeline, TextureView};
+use wgpu::{BindGroup, BindGroupLayout, Color, CommandEncoder, RenderPipeline, TextureView};
 use winit::dpi::PhysicalSize;
 use winit::event::VirtualKeyCode;
 
@@ -84,8 +85,21 @@ enum ShaderAction<'a> {
         src: &'static str,
         layout: &'static [wgpu::VertexBufferLayout<'static>],
         uniforms: &'static [&'static str],
+        topology: wgpu::PrimitiveTopology,
     },
     AddUniform {
+        name: &'static str,
+        binding: u32,
+        shader_stage: wgpu::ShaderStages,
+        buffer: &'a wgpu::Buffer,
+    },
+    /// you have to name your own uniform to be able to use it.
+    CreateShaderWithUniform {
+        src: &'static str,
+        layout: &'static [wgpu::VertexBufferLayout<'static>],
+        uniforms: &'static [&'static str],
+        topology: wgpu::PrimitiveTopology,
+        //
         name: &'static str,
         binding: u32,
         shader_stage: wgpu::ShaderStages,
@@ -106,6 +120,7 @@ trait Renderer<Data> {
             *unsafe { actions.get_unchecked_mut(index) } = s;
         }
     }
+    fn update(&mut self, _data: &mut Data) {}
     fn render(&mut self, _data: &mut Data, _wgpu: WGPU) {}
     fn render_ui(
         &mut self,
@@ -122,6 +137,13 @@ trait Renderer<Data> {
         None
     }
     fn resize(&mut self, _data: &mut Data, _size: PhysicalSize<u32>) {}
+}
+
+struct App {
+    model: Option<Model>,
+    bg: [f32; 3],
+    view_proj: cgmath::Matrix4<f32>,
+    view_proj_dirty: bool,
 }
 
 fn main() {
@@ -146,11 +168,17 @@ fn main() {
         znear: 0.1,
         zfar: 100.0,
     };
+    let light = LightRendererBuilder;
     let renderer = WGPURenderer::new(
-        model,
+        App {
+            model,
+            bg: [0.0; 3],
+            view_proj: cgmath::Matrix4::identity(),
+            view_proj_dirty: false,
+        },
         Some(VirtualKeyCode::R),
         &window,
-        tuple_list!(model_renderer, camera),
+        tuple_list!(model_renderer, camera, light),
     );
     window.run(renderer);
 }

@@ -68,8 +68,6 @@ impl Window {
                 }
                 event::Event::RedrawRequested(_) => {
                     platform.update_time(start_time.elapsed().as_secs_f64());
-
-                    renderer.update();
                     do_render = true;
                 }
                 event::Event::MainEventsCleared => {
@@ -78,6 +76,7 @@ impl Window {
                 _ => {}
             }
             if do_render {
+                renderer.update();
                 match renderer.render(
                     self.window.scale_factor() as _,
                     &mut platform,
