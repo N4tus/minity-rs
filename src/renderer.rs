@@ -1,7 +1,7 @@
 use crate::objects::Vertex;
-use crate::{App, Dirty, Model, Renderer, RendererBuilder, ShaderAction, UiActions, WGPU};
+use crate::{App, Dirty, Renderer, RendererBuilder, ShaderAction, UiActions, WGPU};
 use cgmath::{InnerSpace, Rotation, Rotation3, SquareMatrix};
-use egui::{menu, CtxRef, Ui, Widget};
+use egui::{CtxRef, Ui, Widget};
 use egui_wgpu_backend::wgpu::Device;
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::{BufferUsages, Color, VertexBufferLayout};
@@ -78,7 +78,14 @@ impl Renderer<App> for ModelRenderer {
                         },
                     },
                 ],
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: wgpu.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: true,
+                    }),
+                    stencil_ops: None,
+                }),
             });
 
             // NEW!
@@ -110,7 +117,7 @@ impl Renderer<App> for ModelRenderer {
                 .num_columns(2)
                 .spacing([40.0, 4.0])
                 .striped(true)
-                .show(ui, |ui| {})
+                .show(ui, |_ui| {})
             // ui.color_edit_button_rgb(&mut data.bg);
         });
         // egui::panel::SidePanel::right("side").show(_ctx, |ui| {
@@ -384,7 +391,14 @@ impl Renderer<App> for LightRenderer {
                     },
                 },
             ],
-            depth_stencil_attachment: None,
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: wgpu.depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: true,
+                }),
+                stencil_ops: None,
+            }),
         });
 
         render_pass.set_pipeline(wgpu.current_render_pipeline().as_ref().unwrap());

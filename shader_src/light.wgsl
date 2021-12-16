@@ -56,7 +56,7 @@ fn vs_main(
     let pos_viewport   = corner_viewport   + center_viewport;
 
     var out: VertexOutput;
-    out.clip_position = vec4<f32>(pos_normalized, 0.0, 1.0);
+    out.clip_position = vec4<f32>(pos_normalized, pos.z / pos.w, 1.0);
     out.pos = pos_viewport;
     out.center = center_viewport;
     out.size = light.size;

@@ -15,7 +15,7 @@ use egui::{CtxRef, Ui};
 use egui_winit_platform::Platform;
 use std::cell::RefCell;
 use tuple_list::tuple_list;
-use wgpu::{BindGroup, BindGroupLayout, Color, CommandEncoder, RenderPipeline, TextureView};
+use wgpu::{BindGroup, BindGroupLayout, CommandEncoder, RenderPipeline, TextureView};
 use winit::dpi::PhysicalSize;
 use winit::event::VirtualKeyCode;
 
@@ -53,6 +53,7 @@ trait RendererBuilder<Data> {
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Clone)]
 pub(crate) struct WGPU<'a> {
+    pub(crate) depth_view: &'a TextureView,
     pub(crate) queue: &'a wgpu::Queue,
     pub(crate) command_encoder: &'a RefCell<CommandEncoder>,
     pub(crate) view: &'a TextureView,
