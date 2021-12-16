@@ -8,6 +8,7 @@ use crate::graphics::WGPURenderer;
 use crate::objects::{load_model, LoadError, Model};
 use crate::renderer::{CameraBuilder, LightRendererBuilder, ModelRendererBuilder};
 use crate::window::Window;
+use bitflags::bitflags;
 use cgmath::SquareMatrix;
 use egui::epaint::ClippedShape;
 use egui::{CtxRef, Ui};
@@ -139,11 +140,19 @@ trait Renderer<Data> {
     fn resize(&mut self, _data: &mut Data, _size: PhysicalSize<u32>) {}
 }
 
+bitflags! {
+   struct Dirty: u32 {
+        const CAMERA = 0b00000001;
+        const LIGHT  = 0b00000010;
+    }
+}
+
 struct App {
     model: Option<Model>,
     bg: [f32; 3],
     view_proj: cgmath::Matrix4<f32>,
-    view_proj_dirty: bool,
+    light_data: cgmath::Point3<f32>,
+    dirty: Dirty,
 }
 
 fn main() {
@@ -162,7 +171,7 @@ fn main() {
     let window = Window::new();
     let model_renderer = ModelRendererBuilder;
     let camera = CameraBuilder {
-        eye: (0.0, 1.0, 2.0).into(),
+        eye: (0.0, 0.0, 2.0).into(),
         target: (0.0, 0.0, 0.0).into(),
         fovy: 45.0,
         znear: 0.1,
@@ -174,7 +183,8 @@ fn main() {
             model,
             bg: [0.0; 3],
             view_proj: cgmath::Matrix4::identity(),
-            view_proj_dirty: false,
+            light_data: cgmath::Point3::new(0.0, 0.0, 0.0),
+            dirty: Dirty::empty(),
         },
         Some(VirtualKeyCode::R),
         &window,

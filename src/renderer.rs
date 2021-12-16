@@ -1,5 +1,5 @@
 use crate::objects::Vertex;
-use crate::{App, Model, Renderer, RendererBuilder, ShaderAction, UiActions, WGPU};
+use crate::{App, Dirty, Model, Renderer, RendererBuilder, ShaderAction, UiActions, WGPU};
 use cgmath::{InnerSpace, Rotation, Rotation3, SquareMatrix};
 use egui::{menu, CtxRef, Ui, Widget};
 use egui_wgpu_backend::wgpu::Device;
@@ -105,6 +105,14 @@ impl Renderer<App> for ModelRenderer {
             }
             ui.color_edit_button_rgb(&mut data.bg);
         });
+        egui::menu::menu(menu_ui, "Model", |ui| {
+            egui::Grid::new("model_menu_grid")
+                .num_columns(2)
+                .spacing([40.0, 4.0])
+                .striped(true)
+                .show(ui, |ui| {})
+            // ui.color_edit_button_rgb(&mut data.bg);
+        });
         // egui::panel::SidePanel::right("side").show(_ctx, |ui| {
         // });
     }
@@ -193,19 +201,19 @@ impl RendererBuilder<App> for CameraBuilder {
 }
 
 impl Camera {
-    fn update_camera(&mut self, mat: &mut cgmath::Matrix4<f32>, dirty: &mut bool) {
+    fn update_camera(&mut self, mat: &mut cgmath::Matrix4<f32>, dirty: &mut Dirty) {
         let view = cgmath::Matrix4::look_at_rh(self.eye, self.target, self.up);
         let proj = cgmath::perspective(cgmath::Deg(self.fovy), self.aspect, self.znear, self.zfar);
 
         *mat = proj * view;
-        *dirty = true;
+        dirty.insert(Dirty::CAMERA);
     }
 }
 
 impl Renderer<App> for Camera {
     fn render(&mut self, data: &mut App, wgpu: WGPU) {
-        if data.view_proj_dirty {
-            data.view_proj_dirty = false;
+        if data.dirty.contains(Dirty::CAMERA) {
+            data.dirty.remove(Dirty::CAMERA);
             wgpu.queue.write_buffer(
                 &self.uniform,
                 0,
@@ -243,8 +251,9 @@ impl Renderer<App> for Camera {
                     self.up = qrot.rotate_vector(self.up);
                     self.x_axis = qrot.rotate_vector(self.x_axis);
                     self.y_axis = qrot.rotate_vector(self.y_axis);
+                    data.light_data = qrot.rotate_point(data.light_data);
 
-                    self.update_camera(&mut data.view_proj, &mut data.view_proj_dirty);
+                    self.update_camera(&mut data.view_proj, &mut data.dirty);
 
                     self.mouse_pos = cgmath::Point2::new(position.x as f32, position.y as f32);
                     true
@@ -263,7 +272,7 @@ impl Renderer<App> for Camera {
                 } else {
                     self.eye *= -delta + 1.0;
                 }
-                self.update_camera(&mut data.view_proj, &mut data.view_proj_dirty);
+                self.update_camera(&mut data.view_proj, &mut data.dirty);
                 true
             }
             _ => false,
@@ -281,12 +290,12 @@ impl Renderer<App> for Camera {
 
     fn resize(&mut self, data: &mut App, size: PhysicalSize<u32>) {
         self.aspect = size.width as f32 / size.height as f32;
-        self.update_camera(&mut data.view_proj, &mut data.view_proj_dirty);
+        self.update_camera(&mut data.view_proj, &mut data.dirty);
     }
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Default)]
 struct LightUniform {
     model_view_proj: [[f32; 4]; 4],
     position: [f32; 3],
@@ -294,49 +303,48 @@ struct LightUniform {
     viewport_size: [f32; 2],
     size: f32,
 }
+
 pub(crate) struct LightRendererBuilder;
 pub(crate) struct LightRenderer {
     uniform: wgpu::Buffer,
     uniform_data: LightUniform,
-    dirty: bool,
 }
 
 impl RendererBuilder<App> for LightRendererBuilder {
     type Output = LightRenderer;
 
     fn build(self, data: &mut App, device: &Device, size: PhysicalSize<u32>) -> Self::Output {
-        let light_uniform = LightUniform {
+        let uniform_data = LightUniform {
             model_view_proj: cgmath::Matrix4::identity().into(),
-            position: [0.0, 0.0, 0.0],
+            position: [data.light_data.x, data.light_data.y, data.light_data.z],
             _padding: 0.0,
             viewport_size: [size.width as f32, size.height as f32],
-            // viewport_size: [0.0, 0.0],
             size: 27.0,
         };
         let uniform = device.create_buffer_init(&BufferInitDescriptor {
             label: Some("Light uniform buffer"),
-            contents: bytemuck::cast_slice(&[light_uniform]),
+            contents: bytemuck::cast_slice(&[uniform_data]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         LightRenderer {
             uniform,
-            uniform_data: light_uniform,
-            dirty: false,
+            uniform_data,
         }
     }
 }
 
 impl Renderer<App> for LightRenderer {
     fn update(&mut self, data: &mut App) {
-        if data.view_proj_dirty {
+        if data.dirty.contains(Dirty::CAMERA) {
+            data.dirty.insert(Dirty::LIGHT);
             self.uniform_data.model_view_proj = (OPENGL_TO_WGPU_MATRIX * data.view_proj).into();
-            self.dirty = true;
+            self.uniform_data.position = [data.light_data.x, data.light_data.y, data.light_data.z];
         }
     }
 
-    fn render(&mut self, _data: &mut App, wgpu: WGPU) {
-        if self.dirty {
-            self.dirty = false;
+    fn render(&mut self, data: &mut App, wgpu: WGPU) {
+        if data.dirty.contains(Dirty::LIGHT) {
+            data.dirty.remove(Dirty::LIGHT);
             wgpu.queue
                 .write_buffer(&self.uniform, 0, bytemuck::cast_slice(&[self.uniform_data]));
         }
@@ -367,7 +375,7 @@ impl Renderer<App> for LightRenderer {
 
     fn render_ui(
         &mut self,
-        _data: &mut App,
+        data: &mut App,
         _ctx: &CtxRef,
         menu_ui: &mut Ui,
         _actions: &mut UiActions,
@@ -383,7 +391,15 @@ impl Renderer<App> for LightRenderer {
                         .ui(ui)
                         .changed()
                     {
-                        self.dirty = true;
+                        data.dirty.insert(Dirty::LIGHT);
+                    }
+                    ui.end_row();
+                    ui.label("y pos");
+                    if egui::Slider::new(&mut self.uniform_data.position[1], 0.0..=1.0)
+                        .ui(ui)
+                        .changed()
+                    {
+                        data.dirty.insert(Dirty::LIGHT);
                     }
                     ui.end_row();
                 })
@@ -406,8 +422,8 @@ impl Renderer<App> for LightRenderer {
         })
     }
 
-    fn resize(&mut self, _data: &mut App, size: PhysicalSize<u32>) {
+    fn resize(&mut self, data: &mut App, size: PhysicalSize<u32>) {
         self.uniform_data.viewport_size = [size.width as f32, size.height as f32];
-        self.dirty = true;
+        data.dirty.insert(Dirty::LIGHT);
     }
 }

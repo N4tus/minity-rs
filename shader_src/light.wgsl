@@ -13,6 +13,7 @@ struct VertexOutput {
     [[builtin(position)]] clip_position: vec4<f32>;
     [[location(0)]] center: vec2<f32>;
     [[location(1)]] size: f32;
+    [[location(2)]] pos: vec2<f32>;
 };
 
 [[stage(vertex)]]
@@ -45,12 +46,19 @@ fn vs_main(
     }
     let pos = light.model_view_proj * vec4<f32>(light.position, 1.0);
 
-    let center = (pos.xy / pos.w)+vec2<f32>(1.0)*light.viewport_size*0.5;
-    let corner = center + corner_pos * light.size / 2.0;
+    let corner_viewport = corner_pos * light.size / 2.0;
+    let corner_normalized = corner_viewport / light.viewport_size * 2.0;
+
+    let center_normalized = pos.xy / pos.w;
+    let center_viewport = (center_normalized+vec2<f32>(1.0))*light.viewport_size*0.5;
+
+    let pos_normalized = corner_normalized + center_normalized;
+    let pos_viewport   = corner_viewport   + center_viewport;
 
     var out: VertexOutput;
-    out.clip_position = vec4<f32>(corner / light.viewport_size * 2.0 - vec2<f32>(1.0), 0.0, 1.0);
-    out.center = center;
+    out.clip_position = vec4<f32>(pos_normalized, 0.0, 1.0);
+    out.pos = pos_viewport;
+    out.center = center_viewport;
     out.size = light.size;
     return out;
 }
@@ -59,7 +67,7 @@ fn vs_main(
 
 [[stage(fragment)]]
 fn fs_main(in: VertexOutput) -> [[location(0)]] vec4<f32> {
-    let distance = sqrt(4.0)*length(in.clip_position.xy-in.center)/in.size;
+    let distance = 2.0*length(in.pos-in.center)/in.size;
     if (distance >= 1.0) {
         discard;
     }
