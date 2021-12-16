@@ -41,6 +41,11 @@ where
         self.1.visit(data, actions, index + 1);
     }
 
+    fn update(&mut self, data: &mut Data) {
+        self.0.update(data);
+        self.1.update(data);
+    }
+
     fn render(&mut self, data: &mut Data, mut wgpu: WGPU) {
         self.0.render(data, wgpu.clone());
         wgpu.renderer_index += 1;

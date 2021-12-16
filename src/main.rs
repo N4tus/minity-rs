@@ -183,7 +183,7 @@ fn main() {
             model,
             bg: [0.0; 3],
             view_proj: cgmath::Matrix4::identity(),
-            light_data: cgmath::Point3::new(0.0, 0.0, 0.0),
+            light_data: cgmath::Point3::new(0.0, 0.5, 0.0),
             dirty: Dirty::empty(),
         },
         Some(VirtualKeyCode::R),

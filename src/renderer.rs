@@ -149,6 +149,7 @@ pub(crate) struct Camera {
     uniform: wgpu::Buffer,
 
     left_mouse_pressed: bool,
+    shift_pressed: bool,
     mouse_pos: cgmath::Point2<f32>,
     x_axis: cgmath::Vector3<f32>,
     y_axis: cgmath::Vector3<f32>,
@@ -165,21 +166,18 @@ pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::new(
 impl RendererBuilder<App> for CameraBuilder {
     type Output = Camera;
 
-    fn build(
-        self,
-        _data: &mut App,
-        device: &wgpu::Device,
-        size: PhysicalSize<u32>,
-    ) -> Self::Output {
+    fn build(self, data: &mut App, device: &wgpu::Device, size: PhysicalSize<u32>) -> Self::Output {
         let aspect = size.width as f32 / size.height as f32;
         let view = cgmath::Matrix4::look_at_rh(self.eye, self.target, cgmath::Vector3::unit_y());
         let proj = cgmath::perspective(cgmath::Deg(self.fovy), aspect, self.znear, self.zfar);
 
-        let mat = OPENGL_TO_WGPU_MATRIX * proj * view;
+        data.view_proj = proj * view;
 
         let uniform = device.create_buffer_init(&BufferInitDescriptor {
             label: Some("Camera uniform buffer"),
-            contents: bytemuck::cast_slice::<[[f32; 4]; 4], u8>(&[mat.into()]),
+            contents: bytemuck::cast_slice::<[[f32; 4]; 4], u8>(&[(OPENGL_TO_WGPU_MATRIX
+                * data.view_proj)
+                .into()]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -193,6 +191,7 @@ impl RendererBuilder<App> for CameraBuilder {
             aspect,
             uniform,
             left_mouse_pressed: false,
+            shift_pressed: false,
             mouse_pos: cgmath::Point2::new(0.0, 0.0),
             x_axis: cgmath::Vector3::unit_x(),
             y_axis: cgmath::Vector3::unit_y(),
@@ -201,12 +200,13 @@ impl RendererBuilder<App> for CameraBuilder {
 }
 
 impl Camera {
-    fn update_camera(&mut self, mat: &mut cgmath::Matrix4<f32>, dirty: &mut Dirty) {
+    fn update_camera(&mut self, data: &mut App) {
         let view = cgmath::Matrix4::look_at_rh(self.eye, self.target, self.up);
         let proj = cgmath::perspective(cgmath::Deg(self.fovy), self.aspect, self.znear, self.zfar);
 
-        *mat = proj * view;
-        dirty.insert(Dirty::CAMERA);
+        data.view_proj = proj * view;
+
+        data.dirty.insert(Dirty::CAMERA);
     }
 }
 
@@ -247,13 +247,16 @@ impl Renderer<App> for Camera {
                         cgmath::Deg(rot_angle),
                     );
 
-                    self.eye = qrot.rotate_point(self.eye);
-                    self.up = qrot.rotate_vector(self.up);
-                    self.x_axis = qrot.rotate_vector(self.x_axis);
-                    self.y_axis = qrot.rotate_vector(self.y_axis);
-                    data.light_data = qrot.rotate_point(data.light_data);
-
-                    self.update_camera(&mut data.view_proj, &mut data.dirty);
+                    if self.shift_pressed {
+                        data.light_data = qrot.rotate_point(data.light_data);
+                        data.dirty.insert(Dirty::LIGHT);
+                    } else {
+                        self.eye = qrot.rotate_point(self.eye);
+                        self.up = qrot.rotate_vector(self.up);
+                        self.x_axis = qrot.rotate_vector(self.x_axis);
+                        self.y_axis = qrot.rotate_vector(self.y_axis);
+                        self.update_camera(data);
+                    }
 
                     self.mouse_pos = cgmath::Point2::new(position.x as f32, position.y as f32);
                     true
@@ -267,13 +270,26 @@ impl Renderer<App> for Camera {
                     MouseScrollDelta::LineDelta(_, d) => *d,
                     MouseScrollDelta::PixelDelta(px) => px.y as f32,
                 };
-                if delta >= 0.0 {
-                    self.eye /= delta + 1.0;
+                if self.shift_pressed {
+                    if delta >= 0.0 {
+                        data.light_data /= delta + 1.0;
+                    } else {
+                        data.light_data *= -delta + 1.0;
+                    }
+                    data.dirty.insert(Dirty::LIGHT);
                 } else {
-                    self.eye *= -delta + 1.0;
+                    if delta >= 0.0 {
+                        self.eye /= delta + 1.0;
+                    } else {
+                        self.eye *= -delta + 1.0;
+                    }
+                    self.update_camera(data);
                 }
-                self.update_camera(&mut data.view_proj, &mut data.dirty);
                 true
+            }
+            WindowEvent::ModifiersChanged(state) => {
+                self.shift_pressed = state.shift();
+                false
             }
             _ => false,
         }
@@ -290,14 +306,14 @@ impl Renderer<App> for Camera {
 
     fn resize(&mut self, data: &mut App, size: PhysicalSize<u32>) {
         self.aspect = size.width as f32 / size.height as f32;
-        self.update_camera(&mut data.view_proj, &mut data.dirty);
+        self.update_camera(data);
     }
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Default)]
 struct LightUniform {
-    model_view_proj: [[f32; 4]; 4],
+    view_proj: [[f32; 4]; 4],
     position: [f32; 3],
     _padding: f32,
     viewport_size: [f32; 2],
@@ -314,8 +330,10 @@ impl RendererBuilder<App> for LightRendererBuilder {
     type Output = LightRenderer;
 
     fn build(self, data: &mut App, device: &Device, size: PhysicalSize<u32>) -> Self::Output {
+        // The LightRenderer is built after the CameraRenderer, so data.proj has a proper value
+        assert!(!data.view_proj.is_identity());
         let uniform_data = LightUniform {
-            model_view_proj: cgmath::Matrix4::identity().into(),
+            view_proj: (OPENGL_TO_WGPU_MATRIX * data.view_proj).into(),
             position: [data.light_data.x, data.light_data.y, data.light_data.z],
             _padding: 0.0,
             viewport_size: [size.width as f32, size.height as f32],
@@ -335,10 +353,12 @@ impl RendererBuilder<App> for LightRendererBuilder {
 
 impl Renderer<App> for LightRenderer {
     fn update(&mut self, data: &mut App) {
+        if data.dirty.contains(Dirty::LIGHT) {
+            self.uniform_data.position = [data.light_data.x, data.light_data.y, data.light_data.z];
+        }
         if data.dirty.contains(Dirty::CAMERA) {
             data.dirty.insert(Dirty::LIGHT);
-            self.uniform_data.model_view_proj = (OPENGL_TO_WGPU_MATRIX * data.view_proj).into();
-            self.uniform_data.position = [data.light_data.x, data.light_data.y, data.light_data.z];
+            self.uniform_data.view_proj = (OPENGL_TO_WGPU_MATRIX * data.view_proj).into();
         }
     }
 
@@ -387,15 +407,7 @@ impl Renderer<App> for LightRenderer {
                 .striped(true)
                 .show(ui, |ui| {
                     ui.label("size");
-                    if egui::Slider::new(&mut self.uniform_data.size, 5.0..=40.0)
-                        .ui(ui)
-                        .changed()
-                    {
-                        data.dirty.insert(Dirty::LIGHT);
-                    }
-                    ui.end_row();
-                    ui.label("y pos");
-                    if egui::Slider::new(&mut self.uniform_data.position[1], 0.0..=1.0)
+                    if egui::Slider::new(&mut self.uniform_data.size, 5.0..=50.0)
                         .ui(ui)
                         .changed()
                     {
