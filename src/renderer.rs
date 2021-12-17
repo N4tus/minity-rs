@@ -58,44 +58,45 @@ impl RendererBuilder<App> for ModelRendererBuilder {
 impl Renderer<App> for ModelRenderer {
     fn render(&mut self, data: &mut App, wgpu: WGPU) {
         if let Some(model) = &data.model {
-            let mut encoder = wgpu.command_encoder.borrow_mut();
-            let mut uniforms = wgpu.current_uniforms();
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Model Render Pass"),
-                color_attachments: &[
-                    // This is what [[location(0)]] in the fragment shader targets
-                    wgpu::RenderPassColorAttachment {
-                        view: wgpu.view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(Color {
-                                r: data.bg[0] as f64,
-                                g: data.bg[1] as f64,
-                                b: data.bg[2] as f64,
-                                a: 1.0,
-                            }),
-                            store: true,
+            if let Some(pipeline) = wgpu.current_render_pipeline().as_ref() {
+                let mut encoder = wgpu.command_encoder.borrow_mut();
+                let mut uniforms = wgpu.current_uniforms();
+                let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Model Render Pass"),
+                    color_attachments: &[
+                        // This is what [[location(0)]] in the fragment shader targets
+                        wgpu::RenderPassColorAttachment {
+                            view: wgpu.view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(Color {
+                                    r: data.bg[0] as f64,
+                                    g: data.bg[1] as f64,
+                                    b: data.bg[2] as f64,
+                                    a: 1.0,
+                                }),
+                                store: true,
+                            },
                         },
-                    },
-                ],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: wgpu.depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: true,
+                    ],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: wgpu.depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: true,
+                        }),
+                        stencil_ops: None,
                     }),
-                    stencil_ops: None,
-                }),
-            });
+                });
 
-            // NEW!
-            render_pass.set_pipeline(wgpu.current_render_pipeline().as_ref().unwrap()); // 2.
+                render_pass.set_pipeline(pipeline); // 2.
 
-            render_pass.set_bind_group(0, uniforms.next().unwrap(), &[]);
-            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            render_pass.draw_indexed(0..model.indices.len() as u32, 0, 0..1);
-            // 3.
+                render_pass.set_bind_group(0, uniforms.next().unwrap(), &[]);
+                render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                render_pass
+                    .set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..model.indices.len() as u32, 0, 0..1);
+            }
         }
     }
 
@@ -376,35 +377,36 @@ impl Renderer<App> for LightRenderer {
                 .write_buffer(&self.uniform, 0, bytemuck::cast_slice(&[self.uniform_data]));
         }
 
-        let mut encoder = wgpu.command_encoder.borrow_mut();
-        let mut uniforms = wgpu.current_uniforms();
-        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("Light Render Pass"),
-            color_attachments: &[
-                // This is what [[location(0)]] in the fragment shader targets
-                wgpu::RenderPassColorAttachment {
-                    view: wgpu.view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
+        if let Some(pipeline) = wgpu.current_render_pipeline().as_ref() {
+            let mut encoder = wgpu.command_encoder.borrow_mut();
+            let mut uniforms = wgpu.current_uniforms();
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Light Render Pass"),
+                color_attachments: &[
+                    // This is what [[location(0)]] in the fragment shader targets
+                    wgpu::RenderPassColorAttachment {
+                        view: wgpu.view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: true,
+                        },
+                    },
+                ],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: wgpu.depth_view,
+                    depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Load,
                         store: true,
-                    },
-                },
-            ],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: wgpu.depth_view,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: true,
+                    }),
+                    stencil_ops: None,
                 }),
-                stencil_ops: None,
-            }),
-        });
+            });
 
-        render_pass.set_pipeline(wgpu.current_render_pipeline().as_ref().unwrap());
-        render_pass.set_bind_group(0, uniforms.next().unwrap(), &[]);
-        render_pass.draw(0..4, 0..1);
-        // 2.
+            render_pass.set_pipeline(pipeline);
+            render_pass.set_bind_group(0, uniforms.next().unwrap(), &[]);
+            render_pass.draw(0..4, 0..1);
+        }
     }
 
     fn render_ui(
@@ -472,12 +474,10 @@ impl RendererBuilder<App> for RayTracerBuilder {
 
     fn build(self, data: &mut App, device: &Device, _size: PhysicalSize<u32>) -> Self::Output {
         let object_data = RayTracerObjects {
-            inverse_view_proj: (OPENGL_TO_WGPU_MATRIX
-                * data
-                    .view_proj
-                    .invert()
-                    .expect("a view-projection matrix should be invertible"))
-            .into(),
+            inverse_view_proj: (OPENGL_TO_WGPU_MATRIX * data.view_proj)
+                .invert()
+                .expect("a view-projection matrix should be invertible")
+                .into(),
             view_proj: (OPENGL_TO_WGPU_MATRIX * data.view_proj).into(),
         };
         let uniform = device.create_buffer_init(&BufferInitDescriptor {
@@ -496,12 +496,10 @@ impl Renderer<App> for RayTracer {
     fn update(&mut self, data: &mut App) {
         if data.dirty.contains(Dirty::CAMERA) {
             data.dirty.insert(Dirty::RAY_TRACER);
-            self.object_data.inverse_view_proj = (OPENGL_TO_WGPU_MATRIX
-                * data
-                    .view_proj
-                    .invert()
-                    .expect("a view-projection matrix should be invertible"))
-            .into();
+            self.object_data.inverse_view_proj = (OPENGL_TO_WGPU_MATRIX * data.view_proj)
+                .invert()
+                .expect("a view-projection matrix should be invertible")
+                .into();
             self.object_data.view_proj = (OPENGL_TO_WGPU_MATRIX * data.view_proj).into();
         }
     }
@@ -513,34 +511,36 @@ impl Renderer<App> for RayTracer {
                 .write_buffer(&self.uniform, 0, bytemuck::cast_slice(&[self.object_data]));
         }
 
-        let mut encoder = wgpu.command_encoder.borrow_mut();
-        let mut uniforms = wgpu.current_uniforms();
-        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("Ray Tracer Pass"),
-            color_attachments: &[
-                // This is what [[location(0)]] in the fragment shader targets
-                wgpu::RenderPassColorAttachment {
-                    view: wgpu.view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
+        if let Some(pipeline) = wgpu.current_render_pipeline().as_ref() {
+            let mut encoder = wgpu.command_encoder.borrow_mut();
+            let mut uniforms = wgpu.current_uniforms();
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Ray Tracer Pass"),
+                color_attachments: &[
+                    // This is what [[location(0)]] in the fragment shader targets
+                    wgpu::RenderPassColorAttachment {
+                        view: wgpu.view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: true,
+                        },
+                    },
+                ],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: wgpu.depth_view,
+                    depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Load,
                         store: true,
-                    },
-                },
-            ],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: wgpu.depth_view,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: true,
+                    }),
+                    stencil_ops: None,
                 }),
-                stencil_ops: None,
-            }),
-        });
+            });
 
-        render_pass.set_pipeline(wgpu.current_render_pipeline().as_ref().unwrap());
-        render_pass.set_bind_group(0, uniforms.next().unwrap(), &[]);
-        render_pass.draw(0..4, 0..1);
+            render_pass.set_pipeline(pipeline);
+            render_pass.set_bind_group(0, uniforms.next().unwrap(), &[]);
+            render_pass.draw(0..4, 0..1);
+        }
     }
 
     fn shader(&self, _data: &mut App) -> Option<ShaderAction> {
