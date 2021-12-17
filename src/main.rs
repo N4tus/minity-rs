@@ -6,7 +6,9 @@
 
 use crate::graphics::WGPURenderer;
 use crate::objects::{load_model, LoadError, Model};
-use crate::renderer::{CameraBuilder, LightRendererBuilder, ModelRendererBuilder};
+use crate::renderer::{
+    CameraBuilder, LightRendererBuilder, ModelRendererBuilder, RayTracerBuilder,
+};
 use crate::window::Window;
 use bitflags::bitflags;
 use cgmath::SquareMatrix;
@@ -142,9 +144,10 @@ trait Renderer<Data> {
 }
 
 bitflags! {
-   struct Dirty: u32 {
-        const CAMERA = 0b00000001;
-        const LIGHT  = 0b00000010;
+   struct Dirty: u8 {
+        const CAMERA     = 0b0000_0001;
+        const LIGHT      = 0b0000_0010;
+        const RAY_TRACER = 0b0000_0100;
     }
 }
 
@@ -178,6 +181,7 @@ fn main() {
         znear: 0.1,
         zfar: 100.0,
     };
+    let ray_tracer = RayTracerBuilder;
     let light = LightRendererBuilder;
     let renderer = WGPURenderer::new(
         App {
@@ -189,7 +193,7 @@ fn main() {
         },
         Some(VirtualKeyCode::R),
         &window,
-        tuple_list!(model_renderer, camera, light),
+        tuple_list!(model_renderer, camera, ray_tracer, light),
     );
     window.run(renderer);
 }

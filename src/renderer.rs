@@ -255,7 +255,7 @@ impl Renderer<App> for Camera {
                     );
 
                     if self.shift_pressed {
-                        data.light_data = qrot.rotate_point(data.light_data);
+                        data.light_data = qrot.conjugate().rotate_point(data.light_data);
                         data.dirty.insert(Dirty::LIGHT);
                     } else {
                         self.eye = qrot.rotate_point(self.eye);
@@ -451,5 +451,109 @@ impl Renderer<App> for LightRenderer {
     fn resize(&mut self, data: &mut App, size: PhysicalSize<u32>) {
         self.uniform_data.viewport_size = [size.width as f32, size.height as f32];
         data.dirty.insert(Dirty::LIGHT);
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct RayTracerObjects {
+    inverse_view_proj: [[f32; 4]; 4],
+    view_proj: [[f32; 4]; 4],
+}
+
+pub(crate) struct RayTracerBuilder;
+pub(crate) struct RayTracer {
+    object_data: RayTracerObjects,
+    uniform: wgpu::Buffer,
+}
+
+impl RendererBuilder<App> for RayTracerBuilder {
+    type Output = RayTracer;
+
+    fn build(self, data: &mut App, device: &Device, _size: PhysicalSize<u32>) -> Self::Output {
+        let object_data = RayTracerObjects {
+            inverse_view_proj: (OPENGL_TO_WGPU_MATRIX
+                * data
+                    .view_proj
+                    .invert()
+                    .expect("a view-projection matrix should be invertible"))
+            .into(),
+            view_proj: (OPENGL_TO_WGPU_MATRIX * data.view_proj).into(),
+        };
+        let uniform = device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("Ray-tracer uniform buffer"),
+            contents: bytemuck::cast_slice(&[object_data]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        Self::Output {
+            object_data,
+            uniform,
+        }
+    }
+}
+
+impl Renderer<App> for RayTracer {
+    fn update(&mut self, data: &mut App) {
+        if data.dirty.contains(Dirty::CAMERA) {
+            data.dirty.insert(Dirty::RAY_TRACER);
+            self.object_data.inverse_view_proj = (OPENGL_TO_WGPU_MATRIX
+                * data
+                    .view_proj
+                    .invert()
+                    .expect("a view-projection matrix should be invertible"))
+            .into();
+            self.object_data.view_proj = (OPENGL_TO_WGPU_MATRIX * data.view_proj).into();
+        }
+    }
+
+    fn render(&mut self, data: &mut App, wgpu: WGPU) {
+        if data.dirty.contains(Dirty::RAY_TRACER) {
+            data.dirty.remove(Dirty::RAY_TRACER);
+            wgpu.queue
+                .write_buffer(&self.uniform, 0, bytemuck::cast_slice(&[self.object_data]));
+        }
+
+        let mut encoder = wgpu.command_encoder.borrow_mut();
+        let mut uniforms = wgpu.current_uniforms();
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Ray Tracer Pass"),
+            color_attachments: &[
+                // This is what [[location(0)]] in the fragment shader targets
+                wgpu::RenderPassColorAttachment {
+                    view: wgpu.view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: true,
+                    },
+                },
+            ],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: wgpu.depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: true,
+                }),
+                stencil_ops: None,
+            }),
+        });
+
+        render_pass.set_pipeline(wgpu.current_render_pipeline().as_ref().unwrap());
+        render_pass.set_bind_group(0, uniforms.next().unwrap(), &[]);
+        render_pass.draw(0..4, 0..1);
+    }
+
+    fn shader(&self, _data: &mut App) -> Option<ShaderAction> {
+        Some(ShaderAction::CreateShaderWithUniform {
+            src: "shader_src/ray_tracer.wgsl",
+            layout: &[],
+            uniforms: &["ray_tracer"],
+            topology: wgpu::PrimitiveTopology::TriangleStrip,
+
+            name: "ray_tracer",
+            binding: 0,
+            shader_stage: wgpu::ShaderStages::FRAGMENT,
+            buffer: &self.uniform,
+        })
     }
 }
