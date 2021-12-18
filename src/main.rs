@@ -165,11 +165,9 @@ fn main() {
     let mut model = None;
     match model_result {
         Err(LoadError::NoModelToLoad) => log::error!("no model to load"),
-        Err(LoadError::ObjError(err)) => log::error!("Error parsing files: {:?}", err),
         Err(LoadError::NativeError(err)) => log::error!("Error showing file dialog: {:?}", err),
         Err(LoadError::Other(err)) => log::error!("{}", err),
-        Err(LoadError::IoError(err)) => log::error!("Error loading files: {}", err),
-        Err(LoadError::FormatError(err)) => log::error!("Error converting obj file: {}", err),
+        Err(LoadError::TObjError(err)) => log::error!("Error loading obj file: {}", err),
         Ok(m) => model = Some(m),
     }
     let window = Window::new();

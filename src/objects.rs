@@ -1,10 +1,13 @@
 use bytemuck::{Pod, Zeroable};
 use cgmath::{Matrix4, SquareMatrix, Vector3};
+use egui::CursorIcon::Default;
 use itertools::Itertools;
+use log::Level::Debug;
 use native_dialog::FileDialog;
-use nobject_rs::{load_mtl, load_obj, ObjError};
 use std::collections::HashMap;
+use std::ops::{Range, RangeBounds};
 use std::path::PathBuf;
+use tobj::{LoadOptions, Mesh};
 
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 #[repr(C)]
@@ -42,41 +45,48 @@ impl Vertex {
 
 pub(crate) struct Group {
     indices_start: usize,
-    indices_count: usize,
+    indices_end: usize,
+    vertex_start: usize,
+    vertex_end: usize,
     transformation: Matrix4<f32>,
+    name: String,
+    material: Option<usize>,
 }
 
 pub(crate) struct Model {
     pub(crate) vertices: Vec<Vertex>,
     pub(crate) indices: Vec<u32>,
-    pub(crate) groups: HashMap<String, Group>,
+    pub(crate) groups: Vec<Group>,
+}
+
+impl Group {
+    pub(crate) fn vertex_range(&self) -> impl RangeBounds<wgpu::BufferAddress> {
+        ((self.vertex_start * std::mem::size_of::<Vertex>()) as wgpu::BufferAddress)
+            ..((self.vertex_end * std::mem::size_of::<Vertex>()) as wgpu::BufferAddress)
+    }
+
+    pub(crate) fn index_range(&self) -> Range<u32> {
+        (self.indices_start as u32)..(self.indices_end as u32)
+    }
 }
 
 #[derive(Debug)]
 pub(crate) enum LoadError {
     NativeError(native_dialog::Error),
-    ObjError(ObjError),
     NoModelToLoad,
     Other(String),
-    FormatError(String),
-    IoError(std::io::Error),
+    TObjError(tobj::LoadError),
+}
+
+impl From<tobj::LoadError> for LoadError {
+    fn from(err: tobj::LoadError) -> Self {
+        Self::TObjError(err)
+    }
 }
 
 impl From<native_dialog::Error> for LoadError {
     fn from(err: native_dialog::Error) -> Self {
         Self::NativeError(err)
-    }
-}
-
-impl From<ObjError> for LoadError {
-    fn from(err: ObjError) -> Self {
-        Self::ObjError(err)
-    }
-}
-
-impl From<std::io::Error> for LoadError {
-    fn from(err: std::io::Error) -> Self {
-        Self::IoError(err)
     }
 }
 
@@ -95,90 +105,96 @@ fn load_model_with_path(path: impl Into<PathBuf>) -> Result<Model, LoadError> {
             path.to_string_lossy()
         )));
     }
-    let base_path = path
-        .parent()
-        .ok_or_else(|| {
-            LoadError::Other(format!(
-                "Cannot get parent of: `{}`",
-                path.to_string_lossy()
-            ))
-        })?
-        .to_path_buf();
-    let obj_data = std::fs::read_to_string(path)?;
-    let obj = load_obj(&obj_data)?;
+    let (model, material) = tobj::load_obj(
+        path,
+        &LoadOptions {
+            single_index: true,
+            triangulate: true,
+            ignore_lines: true,
+            ignore_points: true,
+            ..LoadOptions::default()
+        },
+    )?;
+    let material = material?;
 
-    let mut mats = Vec::new();
-    for lib_path in &obj.material_libs {
-        let mut base_path = base_path.clone();
-        base_path.push(lib_path);
-        let mlt_data = std::fs::read_to_string(base_path)?;
-        let mlt = load_mtl(&mlt_data)?;
-        mats.push(mlt);
+    let mut position_count = 0usize;
+    let mut normal_count = 0usize;
+    let mut uv_count = 0usize;
+    let mut index_count = 0usize;
+    for model in &model {
+        position_count += model.mesh.positions.len();
+        normal_count += model.mesh.normals.len();
+        uv_count += model.mesh.texcoords.len();
+        index_count += model.mesh.indices.len();
     }
 
-    if (obj.vertices.len() != obj.normals.len() && !obj.normals.is_empty())
-        || (obj.vertices.len() != obj.textures.len() && !obj.textures.is_empty())
-    {
-        return Err(LoadError::Other(format!(
-            "different sizes of vertices ({}), normals ({}), and textures ({})",
-            obj.vertices.len(),
-            obj.normals.len(),
-            obj.textures.len()
-        )));
-    }
+    let mut vertex_buffer_data = Vec::with_capacity(position_count + normal_count + uv_count);
+    let mut index_buffer_data = vec![0u32; index_count];
+    let mut groups = Vec::with_capacity(model.len());
 
-    let unwrap = |v: Option<f32>| {
-        v.ok_or_else(|| LoadError::FormatError("A uv coordinate has no v component".to_string()))
-    };
-    let mut vertex_data = Vec::<Vertex>::with_capacity(obj.vertices.len());
-    for (index, vertex) in obj.vertices.into_iter().enumerate() {
-        let normal = obj
-            .normals
-            .get(index)
-            .map(|n| [n.x, n.y, n.z])
-            .unwrap_or([0.0; 3]);
-        let uv = obj.textures.get(index);
-        let uv = if let Some(uv) = uv {
-            [uv.u, unwrap(uv.v)?]
-        } else {
-            [0.0; 2]
-        };
-        vertex_data.push(Vertex {
-            pos: [vertex.x, vertex.y, vertex.z],
-            normal,
-            uv,
-        });
-    }
-
-    let mut groups = HashMap::new();
-    let mut indices =
-        Vec::with_capacity(obj.faces.values().map(|f| f.len() * 3).sum1().unwrap_or(0));
-    for (name, group) in obj.faces {
-        let indices_start = indices.len();
-        for face in group {
-            if face.elements.len() != 3 {
-                return Err(LoadError::FormatError(
-                    "A face must be a triangle.".to_string(),
-                ));
-            }
-            for f in face.elements {
-                let v = (f.vertex_index - 1) as u32;
-                indices.push(v);
-            }
+    let mut current_index_buffer_index = 0usize;
+    let mut current_vertex_buffer_index = 0usize;
+    for model in model {
+        let vertex_count = model.mesh.positions.len() / 3;
+        for idx in 0..vertex_count {
+            vertex_buffer_data.push(Vertex {
+                pos: [
+                    model.mesh.positions[idx * 3],
+                    model.mesh.positions[idx * 3 + 1],
+                    model.mesh.positions[idx * 3 + 2],
+                ],
+                normal: [
+                    model.mesh.normals.get(idx * 3).copied().unwrap_or_default(),
+                    model
+                        .mesh
+                        .normals
+                        .get(idx * 3 + 1)
+                        .copied()
+                        .unwrap_or_default(),
+                    model
+                        .mesh
+                        .normals
+                        .get(idx * 3 + 2)
+                        .copied()
+                        .unwrap_or_default(),
+                ],
+                uv: [
+                    model
+                        .mesh
+                        .texcoords
+                        .get(idx * 2)
+                        .copied()
+                        .unwrap_or_default(),
+                    model
+                        .mesh
+                        .texcoords
+                        .get(idx * 2 + 1)
+                        .copied()
+                        .unwrap_or_default(),
+                ],
+            });
         }
-        groups.insert(
-            name,
-            Group {
-                indices_start,
-                transformation: Matrix4::identity(),
-                indices_count: indices.len() - indices_start,
-            },
-        );
+        index_buffer_data
+            [current_index_buffer_index..(current_index_buffer_index + model.mesh.indices.len())]
+            .copy_from_slice(model.mesh.indices.as_slice());
+
+        groups.push(Group {
+            indices_start: current_index_buffer_index,
+            indices_end: current_index_buffer_index + model.mesh.indices.len(),
+            vertex_start: current_vertex_buffer_index,
+            vertex_end: current_vertex_buffer_index + vertex_count,
+            transformation: cgmath::Matrix4::identity(),
+            name: model.name,
+            material: model.mesh.material_id,
+        });
+
+        current_index_buffer_index += model.mesh.indices.len();
+        current_vertex_buffer_index += vertex_count;
     }
 
     Ok(Model {
-        vertices: vertex_data,
-        indices,
+        vertices: vertex_buffer_data,
+        indices: index_buffer_data,
         groups,
     })
 }

@@ -90,12 +90,15 @@ impl Renderer<App> for ModelRenderer {
                 });
 
                 render_pass.set_pipeline(pipeline); // 2.
-
                 render_pass.set_bind_group(0, uniforms.next().unwrap(), &[]);
-                render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
                 render_pass
                     .set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                render_pass.draw_indexed(0..model.indices.len() as u32, 0, 0..1);
+
+                for group in &model.groups {
+                    render_pass
+                        .set_vertex_buffer(0, self.vertex_buffer.slice(group.vertex_range()));
+                    render_pass.draw_indexed(group.index_range(), 0, 0..1);
+                }
             }
         }
     }
@@ -119,10 +122,7 @@ impl Renderer<App> for ModelRenderer {
                 .spacing([40.0, 4.0])
                 .striped(true)
                 .show(ui, |_ui| {})
-            // ui.color_edit_button_rgb(&mut data.bg);
         });
-        // egui::panel::SidePanel::right("side").show(_ctx, |ui| {
-        // });
     }
 
     fn shader(&self, _data: &mut App) -> Option<ShaderAction> {
