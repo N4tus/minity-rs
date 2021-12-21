@@ -120,7 +120,7 @@ where
         &'static [&'static str],
         wgpu::PrimitiveTopology,
     )>; <Renderers as TupleList>::TUPLE_LIST_SIZE],
-    reload_shader_key: Option<winit::event::VirtualKeyCode>,
+    reload_shader_key: Option<VirtualKeyCode>,
     data: Data,
 }
 
@@ -359,7 +359,7 @@ struct State {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
-    size: winit::dpi::PhysicalSize<u32>,
+    size: PhysicalSize<u32>,
 }
 
 static SHADER_COMPILATION_ERROR: std::sync::atomic::AtomicBool = AtomicBool::new(false);
@@ -460,13 +460,13 @@ where
                     input:
                         KeyboardInput {
                             state: ElementState::Released,
-                            virtual_keycode: Some(pressed_key),
+                            virtual_keycode: Some(keycode),
                             ..
                         },
                     ..
                 } = event
                 {
-                    if key == pressed_key {
+                    if key == keycode {
                         self.init_shader();
                         return true;
                     }

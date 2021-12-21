@@ -1,13 +1,65 @@
+use crate::array_vec::ArrayVec;
 use bytemuck::{Pod, Zeroable};
 use cgmath::{Matrix4, SquareMatrix, Vector3};
-use egui::CursorIcon::Default;
-use itertools::Itertools;
-use log::Level::Debug;
+use image::{DynamicImage, ImageError, ImageFormat};
 use native_dialog::FileDialog;
-use std::collections::HashMap;
+use std::fs::File;
+use std::io::{BufReader, Error};
 use std::ops::{Range, RangeBounds};
 use std::path::PathBuf;
-use tobj::{LoadOptions, Mesh};
+use tobj::LoadOptions;
+
+pub const MAX_MATERIALS: usize = 8;
+
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+#[repr(C)]
+pub(crate) struct MaterialData {
+    /// Ambient color of the material.
+    pub ambient: [f32; 3],
+    // _d are padding
+    _0: f32,
+    /// Diffuse color of the material.
+    pub diffuse: [f32; 3],
+    _1: f32,
+    /// Specular color of the material.
+    pub specular: [f32; 3],
+    /// Material shininess attribute. Also called `glossiness`.
+    pub shininess: f32,
+}
+
+impl Default for MaterialData {
+    fn default() -> Self {
+        Self {
+            ambient: [0.0; 3],
+            _0: 0.0,
+            diffuse: [0.5; 3],
+            _1: 0.0,
+            specular: [1.0; 3],
+            shininess: 50.0,
+        }
+    }
+}
+
+pub(crate) struct Material {
+    /// Material name as specified in the `MTL` file.
+    pub name: String,
+
+    /// Ambient texture file for the material
+    pub ambient_texture: Option<DynamicImage>,
+    /// Diffuse texture file for the material.
+    pub diffuse_texture: Option<DynamicImage>,
+    /// Specular texture file for the material.
+    pub specular_texture: Option<DynamicImage>,
+    // ///Normal map texture file for the material.
+    // pub normal_texture: DynamicImage,
+    /// Shininess map texture file for the material.
+    pub shininess_texture: Option<DynamicImage>,
+}
+
+pub(crate) struct MaterialInfo {
+    pub(crate) shader_data: ArrayVec<MaterialData, MAX_MATERIALS>,
+    pub(crate) material_info: ArrayVec<Material, MAX_MATERIALS>,
+}
 
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 #[repr(C)]
@@ -57,6 +109,7 @@ pub(crate) struct Model {
     pub(crate) vertices: Vec<Vertex>,
     pub(crate) indices: Vec<u32>,
     pub(crate) groups: Vec<Group>,
+    pub(crate) materials: MaterialInfo,
 }
 
 impl Group {
@@ -76,6 +129,20 @@ pub(crate) enum LoadError {
     NoModelToLoad,
     Other(String),
     TObjError(tobj::LoadError),
+    IOError(std::io::Error),
+    ImageError(image::ImageError),
+}
+
+impl From<image::ImageError> for LoadError {
+    fn from(err: ImageError) -> Self {
+        Self::ImageError(err)
+    }
+}
+
+impl From<std::io::Error> for LoadError {
+    fn from(err: Error) -> Self {
+        Self::IOError(err)
+    }
 }
 
 impl From<tobj::LoadError> for LoadError {
@@ -112,7 +179,6 @@ fn load_model_with_path(path: impl Into<PathBuf>) -> Result<Model, LoadError> {
             triangulate: true,
             ignore_lines: true,
             ignore_points: true,
-            ..LoadOptions::default()
         },
     )?;
     let material = material?;
@@ -192,10 +258,67 @@ fn load_model_with_path(path: impl Into<PathBuf>) -> Result<Model, LoadError> {
         current_vertex_buffer_index += vertex_count;
     }
 
+    let mut materials = ArrayVec::new();
+    let mut material_data = ArrayVec::new();
+    for material in material.into_iter().take(MAX_MATERIALS) {
+        let ambient_texture = if !material.ambient_texture.is_empty() {
+            Some(image::load(
+                BufReader::new(File::open(&material.ambient_texture)?),
+                ImageFormat::Png,
+            )?)
+        } else {
+            None
+        };
+        let diffuse_texture = if !material.ambient_texture.is_empty() {
+            Some(image::load(
+                BufReader::new(File::open(&material.diffuse_texture)?),
+                ImageFormat::Png,
+            )?)
+        } else {
+            None
+        };
+        let specular_texture = if !material.ambient_texture.is_empty() {
+            Some(image::load(
+                BufReader::new(File::open(&material.specular_texture)?),
+                ImageFormat::Png,
+            )?)
+        } else {
+            None
+        };
+        let shininess_texture = if !material.ambient_texture.is_empty() {
+            Some(image::load(
+                BufReader::new(File::open(&material.shininess_texture)?),
+                ImageFormat::Png,
+            )?)
+        } else {
+            None
+        };
+        materials.push(Material {
+            name: material.name,
+            ambient_texture,
+            diffuse_texture,
+            specular_texture,
+            // normal_texture: "".to_string(),
+            shininess_texture,
+        });
+        material_data.push(MaterialData {
+            ambient: material.ambient,
+            _0: 0.0,
+            diffuse: material.diffuse,
+            _1: 0.0,
+            specular: material.specular,
+            shininess: material.shininess,
+        });
+    }
+
     Ok(Model {
         vertices: vertex_buffer_data,
         indices: index_buffer_data,
         groups,
+        materials: MaterialInfo {
+            shader_data: material_data,
+            material_info: materials,
+        },
     })
 }
 

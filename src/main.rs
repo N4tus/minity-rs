@@ -3,6 +3,7 @@
 #![feature(maybe_uninit_array_assume_init)]
 #![feature(maybe_uninit_slice)]
 #![feature(negative_impls)]
+#![feature(maybe_uninit_extra)]
 
 use crate::graphics::WGPURenderer;
 use crate::objects::{load_model, LoadError, Model};
@@ -19,16 +20,17 @@ use std::cell::RefCell;
 use tuple_list::tuple_list;
 use wgpu::{BindGroup, BindGroupLayout, CommandEncoder, RenderPipeline, TextureView};
 use winit::dpi::PhysicalSize;
-use winit::event::VirtualKeyCode;
+use winit::event::{VirtualKeyCode, WindowEvent};
 
+mod array_vec;
 mod graphics;
 mod objects;
 mod renderer;
 mod window;
 
 trait RenderBackend {
-    fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>);
-    fn input(&mut self, event: &winit::event::WindowEvent) -> bool;
+    fn resize(&mut self, new_size: PhysicalSize<u32>);
+    fn input(&mut self, event: &WindowEvent) -> bool;
     fn update(&mut self);
     fn init(&mut self);
     fn render(
@@ -134,7 +136,7 @@ trait Renderer<Data> {
         _actions: &mut UiActions,
     ) {
     }
-    fn input(&mut self, _data: &mut Data, _event: &winit::event::WindowEvent) -> bool {
+    fn input(&mut self, _data: &mut Data, _event: &WindowEvent) -> bool {
         false
     }
     fn shader(&self, _data: &mut Data) -> Option<ShaderAction> {
@@ -148,6 +150,7 @@ bitflags! {
         const CAMERA     = 0b0000_0001;
         const LIGHT      = 0b0000_0010;
         const RAY_TRACER = 0b0000_0100;
+        const MATERIAL   = 0b0000_1000;
     }
 }
 
@@ -168,6 +171,8 @@ fn main() {
         Err(LoadError::NativeError(err)) => log::error!("Error showing file dialog: {:?}", err),
         Err(LoadError::Other(err)) => log::error!("{}", err),
         Err(LoadError::TObjError(err)) => log::error!("Error loading obj file: {}", err),
+        Err(LoadError::IOError(err)) => log::error!("Error loading file: {}", err),
+        Err(LoadError::ImageError(err)) => log::error!("Error loading file: {}", err),
         Ok(m) => model = Some(m),
     }
     let window = Window::new();

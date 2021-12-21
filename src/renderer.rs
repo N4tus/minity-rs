@@ -1,10 +1,12 @@
-use crate::objects::Vertex;
+use crate::objects::{MaterialData, Vertex, MAX_MATERIALS};
 use crate::{App, Dirty, Renderer, RendererBuilder, ShaderAction, UiActions, WGPU};
 use cgmath::{InnerSpace, Rotation, Rotation3, SquareMatrix};
 use egui::{CtxRef, Ui, Widget};
 use egui_wgpu_backend::wgpu::Device;
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
-use wgpu::{BufferUsages, Color, VertexBufferLayout};
+use wgpu::{
+    BufferDescriptor, BufferUsages, Color, ShaderStages, VertexBufferLayout, MAP_ALIGNMENT,
+};
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 
@@ -13,6 +15,7 @@ mod shader;
 pub(crate) struct ModelRenderer {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
+    material_buffer: wgpu::Buffer,
 }
 
 pub(crate) struct ModelRendererBuilder;
@@ -26,18 +29,23 @@ impl RendererBuilder<App> for ModelRendererBuilder {
         device: &wgpu::Device,
         _size: PhysicalSize<u32>,
     ) -> Self::Output {
-        let (vertex_buffer, index_buffer) = {
-            let (data, indices) = if let Some(m) = &data.model {
+        let (vertex_buffer, index_buffer, mut material_buffer) = {
+            let (data, indices, material) = if let Some(m) = &data.model {
                 (
                     bytemuck::cast_slice(m.vertices.as_slice()),
                     bytemuck::cast_slice(m.indices.as_slice()),
+                    bytemuck::cast_slice(m.materials.shader_data.as_byte_slice()),
                 )
             } else {
-                ([0u8; 0].as_slice(), [0u8; 0].as_slice())
+                (
+                    [0u8; 0].as_slice(),
+                    [0u8; 0].as_slice(),
+                    [0u8; 0].as_slice(),
+                )
             };
             (
                 device.create_buffer_init(&BufferInitDescriptor {
-                    label: Some("model vertex attribute buffer"),
+                    label: Some("model vertex buffer"),
                     contents: data,
                     usage: BufferUsages::VERTEX,
                 }),
@@ -46,11 +54,20 @@ impl RendererBuilder<App> for ModelRendererBuilder {
                     contents: indices,
                     usage: BufferUsages::INDEX,
                 }),
+                device.create_buffer(&BufferDescriptor {
+                    label: Some("material uniform Buffer"),
+                    usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+                    size: (MAX_MATERIALS * std::mem::size_of::<MaterialData>())
+                        as wgpu::BufferAddress,
+                    mapped_at_creation: false,
+                }),
             )
         };
+        data.dirty.insert(Dirty::MATERIAL);
         Self::Output {
             vertex_buffer,
             index_buffer,
+            material_buffer,
         }
     }
 }
@@ -58,6 +75,14 @@ impl RendererBuilder<App> for ModelRendererBuilder {
 impl Renderer<App> for ModelRenderer {
     fn render(&mut self, data: &mut App, wgpu: WGPU) {
         if let Some(model) = &data.model {
+            if data.dirty.contains(Dirty::MATERIAL) {
+                data.dirty.remove(Dirty::MATERIAL);
+                wgpu.queue.write_buffer(
+                    &self.material_buffer,
+                    0,
+                    model.materials.shader_data.as_byte_slice(),
+                );
+            }
             if let Some(pipeline) = wgpu.current_render_pipeline().as_ref() {
                 let mut encoder = wgpu.command_encoder.borrow_mut();
                 let mut uniforms = wgpu.current_uniforms();
@@ -91,6 +116,7 @@ impl Renderer<App> for ModelRenderer {
 
                 render_pass.set_pipeline(pipeline); // 2.
                 render_pass.set_bind_group(0, uniforms.next().unwrap(), &[]);
+                render_pass.set_bind_group(1, uniforms.next().unwrap(), &[]);
                 render_pass
                     .set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
 
@@ -126,11 +152,16 @@ impl Renderer<App> for ModelRenderer {
     }
 
     fn shader(&self, _data: &mut App) -> Option<ShaderAction> {
-        Some(ShaderAction::CreatePipeline {
+        Some(ShaderAction::CreateShaderWithUniform {
             src: "shader_src/model.wgsl",
             layout: VERTEX_LAYOUT,
-            uniforms: &["camera"],
+            uniforms: &["camera", "material"],
             topology: wgpu::PrimitiveTopology::TriangleList,
+
+            name: "material",
+            binding: 0,
+            shader_stage: ShaderStages::VERTEX_FRAGMENT,
+            buffer: &self.material_buffer,
         })
     }
 }

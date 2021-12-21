@@ -3,7 +3,7 @@ use egui::FontDefinitions;
 use egui_winit_platform::{Platform, PlatformDescriptor};
 use std::time::Instant;
 use winit::dpi::PhysicalSize;
-use winit::event::{self, ElementState, KeyboardInput, VirtualKeyCode, WindowEvent};
+use winit::event::{ElementState, Event, KeyboardInput, VirtualKeyCode, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::WindowBuilder;
 
@@ -38,9 +38,10 @@ impl Window {
             let egui_handled_event = platform.captures_event(&event);
             let mut do_render = false;
             match event {
-                event::Event::WindowEvent {
+                Event::WindowEvent {
                     ref event,
                     window_id,
+                    ..
                 } if window_id == self.window.id() => {
                     if egui_handled_event || !renderer.input(event) {
                         match event {
@@ -66,11 +67,11 @@ impl Window {
                         }
                     }
                 }
-                event::Event::RedrawRequested(_) => {
+                Event::RedrawRequested(_) => {
                     platform.update_time(start_time.elapsed().as_secs_f64());
                     do_render = true;
                 }
-                event::Event::MainEventsCleared => {
+                Event::MainEventsCleared => {
                     self.window.request_redraw();
                 }
                 _ => {}
