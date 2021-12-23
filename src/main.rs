@@ -5,8 +5,9 @@
 #![feature(negative_impls)]
 #![feature(maybe_uninit_extra)]
 
+use crate::array_vec::ArrayVec;
 use crate::graphics::WGPURenderer;
-use crate::objects::{load_model, LoadError, Model};
+use crate::objects::{load_model, LoadError, Model, UNIFORM_ALIGNMENT};
 use crate::renderer::{
     CameraBuilder, LightRendererBuilder, ModelRendererBuilder, RayTracerBuilder,
 };
@@ -16,9 +17,11 @@ use cgmath::SquareMatrix;
 use egui::epaint::ClippedShape;
 use egui::{CtxRef, Ui};
 use egui_winit_platform::Platform;
+use log::log;
 use std::cell::RefCell;
+use std::process::exit;
 use tuple_list::tuple_list;
-use wgpu::{BindGroup, BindGroupLayout, CommandEncoder, RenderPipeline, TextureView};
+use wgpu::{BindGroup, BindGroupLayout, CommandEncoder, Limits, RenderPipeline, TextureView};
 use winit::dpi::PhysicalSize;
 use winit::event::{VirtualKeyCode, WindowEvent};
 
@@ -86,45 +89,50 @@ impl<'a> WGPU<'a> {
     }
 }
 
-enum ShaderAction<'a> {
-    CreatePipeline {
-        src: &'static str,
-        layout: &'static [wgpu::VertexBufferLayout<'static>],
-        uniforms: &'static [&'static str],
-        topology: wgpu::PrimitiveTopology,
-    },
-    AddUniform {
-        name: &'static str,
-        binding: u32,
-        shader_stage: wgpu::ShaderStages,
-        buffer: &'a wgpu::Buffer,
-    },
-    /// you have to name your own uniform to be able to use it.
-    CreateShaderWithUniform {
-        src: &'static str,
-        layout: &'static [wgpu::VertexBufferLayout<'static>],
-        uniforms: &'static [&'static str],
-        topology: wgpu::PrimitiveTopology,
-        //
-        name: &'static str,
-        binding: u32,
-        shader_stage: wgpu::ShaderStages,
-        buffer: &'a wgpu::Buffer,
-    },
+const CAP: usize = wgpu_core::MAX_BIND_GROUPS;
+
+struct BufferEntry<'a> {
+    buffer: &'a wgpu::Buffer,
+    stages: wgpu::ShaderStages,
+    offset: wgpu::BufferAddress,
+    size: Option<wgpu::BufferSize>,
+    dynamic: bool,
+}
+
+impl<'a> BufferEntry<'a> {
+    fn static_buf(buffer: &'a wgpu::Buffer, stages: wgpu::ShaderStages) -> Self {
+        Self {
+            buffer,
+            stages,
+            offset: 0,
+            size: None,
+            dynamic: false,
+        }
+    }
+}
+
+struct AddUniform<'a> {
+    name: &'static str,
+    buffer: ArrayVec<BufferEntry<'a>, CAP>,
+}
+
+struct CreatePipeline {
+    src: &'static str,
+    layout: &'static [wgpu::VertexBufferLayout<'static>],
+    uniforms: &'static [&'static str],
+    topology: wgpu::PrimitiveTopology,
+}
+
+#[derive(Default)]
+struct ShaderAction<'a> {
+    add_uniform: Option<AddUniform<'a>>,
+    create_pipeline: Option<CreatePipeline>,
 }
 
 trait Renderer<Data> {
     /// do never override this method
-    fn visit<'a>(
-        &'a self,
-        data: &mut Data,
-        actions: &mut [Option<ShaderAction<'a>>],
-        index: usize,
-    ) {
-        let s = self.shader(data);
-        if s.is_some() {
-            *unsafe { actions.get_unchecked_mut(index) } = s;
-        }
+    fn visit<'a>(&'a self, data: &mut Data, actions: &mut [ShaderAction<'a>], index: usize) {
+        *unsafe { actions.get_unchecked_mut(index) } = self.shader(data);
     }
     fn update(&mut self, _data: &mut Data) {}
     fn render(&mut self, _data: &mut Data, _wgpu: WGPU) {}
@@ -139,8 +147,8 @@ trait Renderer<Data> {
     fn input(&mut self, _data: &mut Data, _event: &WindowEvent) -> bool {
         false
     }
-    fn shader(&self, _data: &mut Data) -> Option<ShaderAction> {
-        None
+    fn shader(&self, _data: &mut Data) -> ShaderAction {
+        Default::default()
     }
     fn resize(&mut self, _data: &mut Data, _size: PhysicalSize<u32>) {}
 }
@@ -164,6 +172,15 @@ struct App {
 
 fn main() {
     env_logger::init();
+    if Limits::default().min_uniform_buffer_offset_alignment
+        != UNIFORM_ALIGNMENT.try_into().unwrap()
+    {
+        log::error!(
+            "min uniform buffer offset alignment is not {}",
+            UNIFORM_ALIGNMENT
+        );
+        exit(1);
+    }
     let model_result = load_model();
     let mut model = None;
     match model_result {

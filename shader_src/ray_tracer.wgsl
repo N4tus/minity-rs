@@ -1,4 +1,3 @@
-[[block]]
 struct RayTracerObjects {
     inverse_view_projection: mat4x4<f32>;
     view_projection: mat4x4<f32>;

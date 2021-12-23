@@ -1,14 +1,21 @@
-use crate::{RenderBackend, Renderer, RendererBuilder, ShaderAction, UiActions, Window, WGPU};
+use crate::{
+    AddUniform, CreatePipeline, RenderBackend, Renderer, RendererBuilder, ShaderAction, UiActions,
+    Window, WGPU,
+};
 use egui::epaint::ClippedShape;
 use egui::{CtxRef, Ui};
 use egui_wgpu_backend::{RenderPass, ScreenDescriptor};
 use egui_winit_platform::Platform;
 use std::cell::RefCell;
+use std::cmp::{max, min};
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use tuple_list::TupleList;
-use wgpu::{BindGroup, BindGroupLayout, RenderPipeline};
+use wgpu::{
+    BindGroup, BindGroupLayout, BindingResource, BufferBinding, BufferSize, Limits,
+    PushConstantRange, RenderPipeline,
+};
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, KeyboardInput, VirtualKeyCode, WindowEvent};
 
@@ -31,12 +38,7 @@ where
     Head: Renderer<Data>,
     Tail: Renderer<Data> + TupleList,
 {
-    fn visit<'a>(
-        &'a self,
-        data: &mut Data,
-        actions: &mut [Option<ShaderAction<'a>>],
-        index: usize,
-    ) {
+    fn visit<'a>(&'a self, data: &mut Data, actions: &mut [ShaderAction<'a>], index: usize) {
         self.0.visit(data, actions, index);
         self.1.visit(data, actions, index + 1);
     }
@@ -199,6 +201,9 @@ where
         }
         let mut pipeline_count = 0_usize;
         let mut render_pipelines = unsafe { MaybeUninit::array_assume_init(render_pipelines) };
+        for s in self.shader_creation_info.iter().flatten() {
+            log::debug!("{}: {:?}", s.0, s.2);
+        }
         for (index, action) in self.shader_creation_info.iter().enumerate() {
             if let Some((src, layout, uniforms, topology)) = action {
                 match std::fs::read_to_string(src) {
@@ -246,6 +251,8 @@ where
                             )
                         };
 
+                        log::debug!("create pipeline `{}`: {:?}", src, bind_group_layouts);
+
                         let render_pipeline_layout = self.state.device.create_pipeline_layout(
                             &wgpu::PipelineLayoutDescriptor {
                                 label: Some(src),
@@ -278,10 +285,9 @@ where
                                     strip_index_format: None,
                                     front_face: wgpu::FrontFace::Ccw, // 2.
                                     cull_mode: Some(wgpu::Face::Back),
+                                    unclipped_depth: false,
                                     // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
                                     polygon_mode: wgpu::PolygonMode::Fill,
-                                    // Requires Features::DEPTH_CLAMPING
-                                    clamp_depth: false,
                                     // Requires Features::CONSERVATIVE_RASTERIZATION
                                     conservative: false,
                                 },
@@ -297,6 +303,7 @@ where
                                     mask: !0,                         // 3.
                                     alpha_to_coverage_enabled: false, // 4.
                                 },
+                                multiview: None,
                             },
                         );
                         pipeline_count += 1;
@@ -332,7 +339,8 @@ where
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Depth32Float,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT // 3.
-                | wgpu::TextureUsages::TEXTURE_BINDING,
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST,
         };
         let texture = device.create_texture(&desc);
 
@@ -387,8 +395,8 @@ impl State {
             .request_device(
                 &wgpu::DeviceDescriptor {
                     features: wgpu::Features::empty(),
-                    limits: wgpu::Limits::default(),
-                    label: None,
+                    limits: Default::default(),
+                    label: Some("device descriptor"),
                 },
                 None, // Trace path
             )
@@ -400,7 +408,7 @@ impl State {
             if SHADER_COMPILATION_ERROR.load(Ordering::Relaxed) {
                 // armed error handler, check it validation error,
                 // and don't panic just lock and disarm handler, to signal there was an error.
-                if let wgpu::Error::ValidationError { description, .. } = &err {
+                if let wgpu::Error::Validation { description, .. } = &err {
                     log::warn!("{}", description);
                     SHADER_COMPILATION_ERROR.store(false, Ordering::Relaxed);
                     return;
@@ -485,10 +493,10 @@ where
     }
 
     fn init(&mut self) {
-        let mut actions: [MaybeUninit<Option<ShaderAction>>;
-            <Renderers as TupleList>::TUPLE_LIST_SIZE] = MaybeUninit::uninit_array();
+        let mut actions: [MaybeUninit<ShaderAction>; <Renderers as TupleList>::TUPLE_LIST_SIZE] =
+            MaybeUninit::uninit_array();
         for action in actions.iter_mut() {
-            action.write(None);
+            action.write(Default::default());
         }
         let mut actions = unsafe { MaybeUninit::array_assume_init(actions) };
         self.renderers = Some(
@@ -506,98 +514,94 @@ where
 
         // gather uniform bind groups
         for (index, action) in actions.iter().enumerate() {
-            match action {
-                Some(ShaderAction::AddUniform {
-                    name,
-                    binding,
-                    shader_stage,
-                    buffer,
-                })
-                | Some(ShaderAction::CreateShaderWithUniform {
-                    name,
-                    binding,
-                    shader_stage,
-                    buffer,
-                    ..
-                }) => {
-                    let bind_group_layout = self.state.device.create_bind_group_layout(
-                        &wgpu::BindGroupLayoutDescriptor {
-                            entries: &[wgpu::BindGroupLayoutEntry {
-                                binding: *binding,
-                                visibility: *shader_stage,
-                                ty: wgpu::BindingType::Buffer {
-                                    ty: wgpu::BufferBindingType::Uniform,
-                                    has_dynamic_offset: false,
-                                    min_binding_size: None,
-                                },
-                                count: None,
-                            }],
-                            label: Some(*name),
+            if let Some(AddUniform { name, buffer }) = &action.add_uniform {
+                let mut layout_entries: [MaybeUninit<wgpu::BindGroupLayoutEntry>;
+                    wgpu_core::MAX_BIND_GROUPS] = MaybeUninit::uninit_array();
+                let mut group_entries: [MaybeUninit<wgpu::BindGroupEntry>;
+                    wgpu_core::MAX_BIND_GROUPS] = MaybeUninit::uninit_array();
+                // buffer cannot be larger than wgpu_core::MAX_BIND_GROUPS
+                for (index, entry) in buffer.iter().enumerate() {
+                    unsafe { layout_entries.get_unchecked_mut(index) }.write(
+                        wgpu::BindGroupLayoutEntry {
+                            binding: index as u32,
+                            visibility: entry.stages,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: entry.dynamic,
+                                min_binding_size: None,
+                            },
+                            count: None,
                         },
                     );
-                    let bind_group =
-                        self.state
-                            .device
-                            .create_bind_group(&wgpu::BindGroupDescriptor {
-                                layout: &bind_group_layout,
-                                entries: &[wgpu::BindGroupEntry {
-                                    binding: *binding,
-                                    resource: buffer.as_entire_binding(),
-                                }],
-                                label: Some(*name),
-                            });
-                    *unsafe { self.bind_groups.get_unchecked_mut(index) } =
-                        Some((*name, bind_group, bind_group_layout));
+                    let resource = BindingResource::Buffer(BufferBinding {
+                        buffer: entry.buffer,
+                        offset: entry.offset,
+                        size: entry.size,
+                    });
+                    unsafe { group_entries.get_unchecked_mut(index) }.write(wgpu::BindGroupEntry {
+                        binding: index as u32,
+                        resource,
+                    });
                 }
-                _ => {}
+                let layout_entries =
+                    unsafe { MaybeUninit::slice_assume_init_ref(&layout_entries[0..buffer.len()]) };
+                let group_entries =
+                    unsafe { MaybeUninit::slice_assume_init_ref(&group_entries[0..buffer.len()]) };
+
+                let bind_group_layout =
+                    self.state
+                        .device
+                        .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                            entries: layout_entries,
+                            label: Some(*name),
+                        });
+                let bind_group = self
+                    .state
+                    .device
+                    .create_bind_group(&wgpu::BindGroupDescriptor {
+                        layout: &bind_group_layout,
+                        entries: group_entries,
+                        label: Some(*name),
+                    });
+                *unsafe { self.bind_groups.get_unchecked_mut(index) } =
+                    Some((*name, bind_group, bind_group_layout));
             }
         }
 
         // resolve uniform bind groups
         for (index, action) in actions.iter().enumerate() {
-            match action {
-                Some(ShaderAction::CreatePipeline { uniforms, .. })
-                | Some(ShaderAction::CreateShaderWithUniform { uniforms, .. }) => {
-                    if uniforms.len() > wgpu_core::MAX_BIND_GROUPS {
-                        panic!(
-                            "Cannot have more than {} bind groups per shader",
-                            wgpu_core::MAX_BIND_GROUPS
-                        );
-                    }
-                    let mut uniform_indices = [0_usize; wgpu_core::MAX_BIND_GROUPS];
-                    let mut uniform_size = 0_usize;
-                    for &uniform_name in *uniforms {
-                        for (uniform_index, uniform) in self.bind_groups.iter().enumerate() {
-                            if let Some((name, _, _)) = uniform {
-                                if uniform_name == *name {
-                                    *unsafe { uniform_indices.get_unchecked_mut(uniform_size) } =
-                                        uniform_index;
-                                    uniform_size += 1;
-                                }
+            if let Some(CreatePipeline { src, uniforms, .. }) = &action.create_pipeline {
+                if uniforms.len() > wgpu_core::MAX_BIND_GROUPS {
+                    panic!(
+                        "Cannot have more than {} bind groups per shader",
+                        wgpu_core::MAX_BIND_GROUPS
+                    );
+                }
+                let mut uniform_indices = [0_usize; wgpu_core::MAX_BIND_GROUPS];
+                let mut uniform_size = 0_usize;
+                for &uniform_name in *uniforms {
+                    for (uniform_index, uniform) in self.bind_groups.iter().enumerate() {
+                        if let Some((name, _, _)) = uniform {
+                            if uniform_name == *name {
+                                *unsafe { uniform_indices.get_unchecked_mut(uniform_size) } =
+                                    uniform_index;
+                                uniform_size += 1;
                             }
                         }
                     }
-                    *unsafe { self.bind_group_association.get_unchecked_mut(index) } =
-                        (uniforms.len(), uniform_indices);
                 }
-                _ => {}
+                *unsafe { self.bind_group_association.get_unchecked_mut(index) } =
+                    (uniforms.len(), uniform_indices);
             }
         }
 
         for (i, action) in actions.into_iter().enumerate() {
-            if let Some(ShaderAction::CreatePipeline {
+            if let Some(CreatePipeline {
                 src,
                 layout,
                 uniforms,
                 topology,
-            })
-            | Some(ShaderAction::CreateShaderWithUniform {
-                src,
-                layout,
-                uniforms,
-                topology,
-                ..
-            }) = action
+            }) = action.create_pipeline
             {
                 *unsafe { self.shader_creation_info.get_unchecked_mut(i) } =
                     Some((src, layout, uniforms, topology));

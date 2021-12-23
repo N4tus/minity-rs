@@ -1,11 +1,18 @@
-use crate::objects::{MaterialData, Vertex, MAX_MATERIALS};
-use crate::{App, Dirty, Renderer, RendererBuilder, ShaderAction, UiActions, WGPU};
+use crate::objects::{MaterialData, MaterialDataPadding, Vertex, MAX_MATERIALS};
+use crate::{
+    AddUniform, App, ArrayVec, BufferEntry, CreatePipeline, Dirty, Renderer, RendererBuilder,
+    ShaderAction, UiActions, WGPU,
+};
 use cgmath::{InnerSpace, Rotation, Rotation3, SquareMatrix};
+use egui::Key::{A, B};
 use egui::{CtxRef, Ui, Widget};
 use egui_wgpu_backend::wgpu::Device;
+use itertools::Itertools;
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
+use wgpu::BlendOperation::Add;
 use wgpu::{
-    BufferDescriptor, BufferUsages, Color, ShaderStages, VertexBufferLayout, MAP_ALIGNMENT,
+    BufferDescriptor, BufferUsages, Color, DynamicOffset, ShaderStages, VertexBufferLayout,
+    MAP_ALIGNMENT,
 };
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -29,19 +36,15 @@ impl RendererBuilder<App> for ModelRendererBuilder {
         device: &wgpu::Device,
         _size: PhysicalSize<u32>,
     ) -> Self::Output {
-        let (vertex_buffer, index_buffer, mut material_buffer) = {
-            let (data, indices, material) = if let Some(m) = &data.model {
+        let (vertex_buffer, index_buffer, material_buffer) = {
+            let (data, indices, mat_count) = if let Some(m) = &data.model {
                 (
                     bytemuck::cast_slice(m.vertices.as_slice()),
                     bytemuck::cast_slice(m.indices.as_slice()),
-                    bytemuck::cast_slice(m.materials.shader_data.as_byte_slice()),
+                    m.materials.shader_data.len(),
                 )
             } else {
-                (
-                    [0u8; 0].as_slice(),
-                    [0u8; 0].as_slice(),
-                    [0u8; 0].as_slice(),
-                )
+                ([0u8; 0].as_slice(), [0u8; 0].as_slice(), 1)
             };
             (
                 device.create_buffer_init(&BufferInitDescriptor {
@@ -57,7 +60,7 @@ impl RendererBuilder<App> for ModelRendererBuilder {
                 device.create_buffer(&BufferDescriptor {
                     label: Some("material uniform Buffer"),
                     usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-                    size: (MAX_MATERIALS * std::mem::size_of::<MaterialData>())
+                    size: (mat_count * std::mem::size_of::<MaterialDataPadding>())
                         as wgpu::BufferAddress,
                     mapped_at_creation: false,
                 }),
@@ -77,11 +80,9 @@ impl Renderer<App> for ModelRenderer {
         if let Some(model) = &data.model {
             if data.dirty.contains(Dirty::MATERIAL) {
                 data.dirty.remove(Dirty::MATERIAL);
-                wgpu.queue.write_buffer(
-                    &self.material_buffer,
-                    0,
-                    model.materials.shader_data.as_byte_slice(),
-                );
+                let d = model.materials.shader_data.as_byte_slice();
+                log::debug!("write {}bytes to material uniform", d.len());
+                wgpu.queue.write_buffer(&self.material_buffer, 0, d);
             }
             if let Some(pipeline) = wgpu.current_render_pipeline().as_ref() {
                 let mut encoder = wgpu.command_encoder.borrow_mut();
@@ -116,13 +117,14 @@ impl Renderer<App> for ModelRenderer {
 
                 render_pass.set_pipeline(pipeline); // 2.
                 render_pass.set_bind_group(0, uniforms.next().unwrap(), &[]);
-                render_pass.set_bind_group(1, uniforms.next().unwrap(), &[]);
+                let material_bind_group = uniforms.next().unwrap();
                 render_pass
                     .set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
 
-                for group in &model.groups {
-                    render_pass
-                        .set_vertex_buffer(0, self.vertex_buffer.slice(group.vertex_range()));
+                render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                for (index, group) in model.groups.iter().enumerate() {
+                    let offset = index * std::mem::size_of::<MaterialDataPadding>();
+                    render_pass.set_bind_group(1, material_bind_group, &[offset as DynamicOffset]);
                     render_pass.draw_indexed(group.index_range(), 0, 0..1);
                 }
             }
@@ -151,18 +153,27 @@ impl Renderer<App> for ModelRenderer {
         });
     }
 
-    fn shader(&self, _data: &mut App) -> Option<ShaderAction> {
-        Some(ShaderAction::CreateShaderWithUniform {
-            src: "shader_src/model.wgsl",
-            layout: VERTEX_LAYOUT,
-            uniforms: &["camera", "material"],
-            topology: wgpu::PrimitiveTopology::TriangleList,
-
-            name: "material",
-            binding: 0,
-            shader_stage: ShaderStages::VERTEX_FRAGMENT,
+    fn shader(&self, _data: &mut App) -> ShaderAction {
+        let mut buffer = ArrayVec::new();
+        buffer.push(BufferEntry {
             buffer: &self.material_buffer,
-        })
+            stages: wgpu::ShaderStages::VERTEX_FRAGMENT,
+            offset: 0,
+            size: wgpu::BufferSize::new(std::mem::size_of::<MaterialData>() as u64),
+            dynamic: true,
+        });
+        ShaderAction {
+            add_uniform: Some(AddUniform {
+                name: "material",
+                buffer,
+            }),
+            create_pipeline: Some(CreatePipeline {
+                src: "shader_src/model.wgsl",
+                layout: VERTEX_LAYOUT,
+                uniforms: &["camera", "material"],
+                topology: wgpu::PrimitiveTopology::TriangleList,
+            }),
+        }
     }
 }
 
@@ -334,13 +345,19 @@ impl Renderer<App> for Camera {
         }
     }
 
-    fn shader(&self, _data: &mut App) -> Option<ShaderAction> {
-        Some(ShaderAction::AddUniform {
-            name: "camera",
-            binding: 0,
-            shader_stage: wgpu::ShaderStages::VERTEX,
-            buffer: &self.uniform,
-        })
+    fn shader(&self, _data: &mut App) -> ShaderAction {
+        let mut buffer = ArrayVec::new();
+        buffer.push(BufferEntry::static_buf(
+            &self.uniform,
+            wgpu::ShaderStages::VERTEX,
+        ));
+        ShaderAction {
+            add_uniform: Some(AddUniform {
+                name: "camera",
+                buffer,
+            }),
+            create_pipeline: None,
+        }
     }
 
     fn resize(&mut self, data: &mut App, size: PhysicalSize<u32>) {
@@ -354,9 +371,10 @@ impl Renderer<App> for Camera {
 struct LightUniform {
     view_proj: [[f32; 4]; 4],
     position: [f32; 3],
-    _padding: f32,
+    _0: f32,
     viewport_size: [f32; 2],
     size: f32,
+    _1: f32,
 }
 
 pub(crate) struct LightRendererBuilder;
@@ -374,9 +392,10 @@ impl RendererBuilder<App> for LightRendererBuilder {
         let uniform_data = LightUniform {
             view_proj: (OPENGL_TO_WGPU_MATRIX * data.view_proj).into(),
             position: [data.light_data.x, data.light_data.y, data.light_data.z],
-            _padding: 0.0,
+            _0: 0.0,
             viewport_size: [size.width as f32, size.height as f32],
             size: 27.0,
+            _1: 0.0,
         };
         let uniform = device.create_buffer_init(&BufferInitDescriptor {
             label: Some("Light uniform buffer"),
@@ -465,20 +484,24 @@ impl Renderer<App> for LightRenderer {
         });
     }
 
-    fn shader(&self, _data: &mut App) -> Option<ShaderAction> {
-        Some(ShaderAction::CreateShaderWithUniform {
-            src: "shader_src/light.wgsl",
-            layout: &[],
-            uniforms: &["light"],
-            // wgpu does not support point sizes, so render a square, that contains a circle with the given size.
-            topology: wgpu::PrimitiveTopology::TriangleStrip,
-
-            // uniform info
-            name: "light",
-            binding: 0,
-            shader_stage: wgpu::ShaderStages::VERTEX,
-            buffer: &self.uniform,
-        })
+    fn shader(&self, _data: &mut App) -> ShaderAction {
+        let mut buffer = ArrayVec::new();
+        buffer.push(BufferEntry::static_buf(
+            &self.uniform,
+            wgpu::ShaderStages::VERTEX,
+        ));
+        ShaderAction {
+            add_uniform: Some(AddUniform {
+                name: "light",
+                buffer,
+            }),
+            create_pipeline: Some(CreatePipeline {
+                src: "shader_src/light.wgsl",
+                layout: &[],
+                uniforms: &["light"],
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+            }),
+        }
     }
 
     fn resize(&mut self, data: &mut App, size: PhysicalSize<u32>) {
@@ -574,17 +597,23 @@ impl Renderer<App> for RayTracer {
         }
     }
 
-    fn shader(&self, _data: &mut App) -> Option<ShaderAction> {
-        Some(ShaderAction::CreateShaderWithUniform {
-            src: "shader_src/ray_tracer.wgsl",
-            layout: &[],
-            uniforms: &["ray_tracer"],
-            topology: wgpu::PrimitiveTopology::TriangleStrip,
-
-            name: "ray_tracer",
-            binding: 0,
-            shader_stage: wgpu::ShaderStages::FRAGMENT,
-            buffer: &self.uniform,
-        })
+    fn shader(&self, _data: &mut App) -> ShaderAction {
+        let mut buffer = ArrayVec::new();
+        buffer.push(BufferEntry::static_buf(
+            &self.uniform,
+            wgpu::ShaderStages::FRAGMENT,
+        ));
+        ShaderAction {
+            add_uniform: Some(AddUniform {
+                name: "ray_tracer",
+                buffer,
+            }),
+            create_pipeline: Some(CreatePipeline {
+                src: "shader_src/ray_tracer.wgsl",
+                layout: &[],
+                uniforms: &["ray_tracer"],
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+            }),
+        }
     }
 }

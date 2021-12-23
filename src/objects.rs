@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use tobj::LoadOptions;
 
 pub const MAX_MATERIALS: usize = 8;
+pub const UNIFORM_ALIGNMENT: usize = 256;
 
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 #[repr(C)]
@@ -26,6 +27,34 @@ pub(crate) struct MaterialData {
     /// Material shininess attribute. Also called `glossiness`.
     pub shininess: f32,
 }
+
+pub const PADDING: usize =
+    UNIFORM_ALIGNMENT - (std::mem::size_of::<MaterialData>() % UNIFORM_ALIGNMENT);
+
+#[derive(Copy, Clone, Debug)]
+#[repr(C)]
+pub(crate) struct MaterialDataPadding {
+    data: MaterialData,
+    /// manually align to UNIFORM_ALIGNMENT
+    _p: [u8; PADDING],
+}
+
+impl MaterialDataPadding {
+    pub(crate) fn new(data: MaterialData) -> Self {
+        Self {
+            data,
+            _p: [0; PADDING],
+        }
+    }
+}
+
+// SAFETY:
+// data is Pod
+// _p is Pod
+// there is no padding between data and _p
+// there is no padding after _p
+unsafe impl Zeroable for MaterialDataPadding {}
+unsafe impl Pod for MaterialDataPadding {}
 
 impl Default for MaterialData {
     fn default() -> Self {
@@ -57,7 +86,7 @@ pub(crate) struct Material {
 }
 
 pub(crate) struct MaterialInfo {
-    pub(crate) shader_data: ArrayVec<MaterialData, MAX_MATERIALS>,
+    pub(crate) shader_data: ArrayVec<MaterialDataPadding, MAX_MATERIALS>,
     pub(crate) material_info: ArrayVec<Material, MAX_MATERIALS>,
 }
 
@@ -195,13 +224,18 @@ fn load_model_with_path(path: impl Into<PathBuf>) -> Result<Model, LoadError> {
     }
 
     let mut vertex_buffer_data = Vec::with_capacity(position_count + normal_count + uv_count);
-    let mut index_buffer_data = vec![0u32; index_count];
+    // let mut index_buffer_data = vec![0u32; index_count];
+    let mut index_buffer_data = Vec::with_capacity(index_count);
     let mut groups = Vec::with_capacity(model.len());
 
     let mut current_index_buffer_index = 0usize;
     let mut current_vertex_buffer_index = 0usize;
     for model in model {
         let vertex_count = model.mesh.positions.len() / 3;
+        let index_offset = vertex_buffer_data.len() as u32;
+        for idx in model.mesh.indices.iter().copied() {
+            index_buffer_data.push(idx + index_offset);
+        }
         for idx in 0..vertex_count {
             vertex_buffer_data.push(Vertex {
                 pos: [
@@ -240,9 +274,9 @@ fn load_model_with_path(path: impl Into<PathBuf>) -> Result<Model, LoadError> {
                 ],
             });
         }
-        index_buffer_data
-            [current_index_buffer_index..(current_index_buffer_index + model.mesh.indices.len())]
-            .copy_from_slice(model.mesh.indices.as_slice());
+        // index_buffer_data
+        //     [current_index_buffer_index..(current_index_buffer_index + model.mesh.indices.len())]
+        //     .copy_from_slice(model.mesh.indices.as_slice());
 
         groups.push(Group {
             indices_start: current_index_buffer_index,
@@ -301,14 +335,14 @@ fn load_model_with_path(path: impl Into<PathBuf>) -> Result<Model, LoadError> {
             // normal_texture: "".to_string(),
             shininess_texture,
         });
-        material_data.push(MaterialData {
+        material_data.push(MaterialDataPadding::new(MaterialData {
             ambient: material.ambient,
             _0: 0.0,
             diffuse: material.diffuse,
             _1: 0.0,
             specular: material.specular,
             shininess: material.shininess,
-        });
+        }));
     }
 
     Ok(Model {

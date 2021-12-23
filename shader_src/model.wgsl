@@ -1,8 +1,5 @@
 // Vertex shader
 
-let material_count = 8;
-
-[[block]] // 1.
 struct CameraUniform {
     view_proj: mat4x4<f32>;
 };
@@ -14,16 +11,11 @@ struct Material {
     shininess: f32;
 };
 
-[[block]]
-struct MaterialUniform {
-    material: array<Material, material_count>;
-};
-
 [[group(0), binding(0)]] // 2.
 var<uniform> camera: CameraUniform;
 
 [[group(1), binding(0)]]
-var<uniform> material: MaterialUniform;
+var<uniform> material: Material;
 
 struct Vertex  {
     [[builtin(vertex_index)]] index: u32;
@@ -43,7 +35,7 @@ fn vs_main(
 ) -> VertexOutput {
     var out: VertexOutput;
     out.clip_position = camera.view_proj * vec4<f32>(vertex.pos, 1.0);
-    out.color = vec4<f32>(material.material[vertex.index].ambient, 1.0);
+    out.color = vec4<f32>(material.ambient, 1.0);
     return out;
 }
 

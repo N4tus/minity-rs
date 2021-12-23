@@ -1,4 +1,3 @@
-[[block]]
 struct LightUniform {
     model_view_proj: mat4x4<f32>;
     position: vec3<f32>;

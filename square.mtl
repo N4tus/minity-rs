@@ -1,5 +1,5 @@
 newmtl MainCube
-Ka 1.0 0.0 0.0
+Ka 0.0 1.0 0.0
 
 newmtl SideCube
-Ka 0.0 1.0 0.0
+Ka 0.0 0.0 1.0
