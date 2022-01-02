@@ -55,7 +55,7 @@ impl<const RC: usize> BindGroupStorage<RC> {
 
         for (index, action) in actions.iter().enumerate() {
             if let Some(CreatePipeline { uniforms, .. }) = &action.create_pipeline {
-                for &uniform in uniforms.iter() {
+                for uniform in uniforms {
                     let bg = unsafe { bind_group_association.get_unchecked_mut(index) };
                     if let Some(bg_idx) = bind_group_map.get(uniform) {
                         bg.push(bg_idx.clone());

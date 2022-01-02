@@ -228,7 +228,7 @@ fn load_model_with_path(path: impl Into<PathBuf>) -> Result<Model, LoadError> {
     for model in model {
         let vertex_count = model.mesh.positions.len() / 3;
         let index_offset = vertex_buffer_data.len() as u32;
-        for idx in model.mesh.indices.iter().copied() {
+        for &idx in &model.mesh.indices {
             index_buffer_data.push(idx + index_offset);
         }
         for idx in 0..vertex_count {

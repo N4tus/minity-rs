@@ -73,8 +73,6 @@ pub(crate) struct WGPU<'a> {
     render_pipelines: &'a [Option<wgpu::RenderPipeline>],
     bind_groups: &'a [&'a wgpu::BindGroup],
     bind_group_association: &'a [Bga],
-    // uniforms: &'a [Option<(&'static str, wgpu::BindGroup, wgpu::BindGroupLayout)>],
-    // current_uniforms: &'a [(usize, [usize; wgpu_core::MAX_BIND_GROUPS])],
     renderer_index: usize,
 }
 
@@ -178,7 +176,7 @@ fn main() {
         Err(LoadError::Other(err)) => log::error!("{}", err),
         Err(LoadError::TObjError(err)) => log::error!("Error loading obj file: {}", err),
         Err(LoadError::IOError(err)) => log::error!("Error loading file: {}", err),
-        Err(LoadError::ImageError(err)) => log::error!("Error loading file: {}", err),
+        Err(LoadError::ImageError(err)) => log::error!("Error loading image: {}", err),
         Ok(m) => model = Some(m),
     }
     let window = Window::new();
