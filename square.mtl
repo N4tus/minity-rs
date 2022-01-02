@@ -1,5 +1,7 @@
 newmtl MainCube
 Ka 0.0 1.0 0.0
+map_Kd square-2.png
 
 newmtl SideCube
 Ka 0.0 0.0 1.0
+map_Kd square-1.png
