@@ -34,6 +34,14 @@ impl<T, const CAP: usize> ArrayVec<T, CAP> {
             None
         }
     }
+
+    pub unsafe fn get_unchecked(&self, index: usize) -> &T {
+        unsafe { MaybeUninit::assume_init_ref(self.data.get_unchecked(index)) }
+    }
+
+    pub unsafe fn get_unchecked_mut(&mut self, index: usize) -> &mut T {
+        unsafe { MaybeUninit::assume_init_mut(self.data.get_unchecked_mut(index)) }
+    }
 }
 
 impl<T: Zeroable + Pod, const CAP: usize> ArrayVec<T, CAP> {
@@ -66,4 +74,37 @@ impl<T, const CAP: usize> std::ops::DerefMut for ArrayVec<T, CAP> {
         // there are `len` count elements stored from 0 to `len`, and they are valid
         unsafe { MaybeUninit::slice_assume_init_mut(&mut self.data[0..self.len]) }
     }
+}
+
+impl<T, const CAP: usize> Default for ArrayVec<T, CAP> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub fn optional_array<T, const S: usize>() -> [Option<T>; S] {
+    let mut arr: [MaybeUninit<Option<T>>; S] = MaybeUninit::uninit_array();
+    for e in arr.iter_mut() {
+        e.write(None);
+    }
+    unsafe { MaybeUninit::array_assume_init(arr) }
+}
+
+pub fn default_array<T: Default, const S: usize>() -> [T; S] {
+    let mut arr: [MaybeUninit<T>; S] = MaybeUninit::uninit_array();
+    for e in arr.iter_mut() {
+        e.write(<T as Default>::default());
+    }
+    unsafe { MaybeUninit::array_assume_init(arr) }
+}
+
+#[macro_export]
+macro_rules! array_vec {
+    ($($v:expr),*) => {{
+        let mut array_vec = crate::array_vec::ArrayVec::new();
+        $(
+            array_vec.push($v);
+        )*
+        array_vec
+    }};
 }

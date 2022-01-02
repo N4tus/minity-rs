@@ -142,11 +142,6 @@ pub(crate) struct Model {
 }
 
 impl Group {
-    pub(crate) fn vertex_range(&self) -> impl RangeBounds<wgpu::BufferAddress> {
-        ((self.vertex_start * std::mem::size_of::<Vertex>()) as wgpu::BufferAddress)
-            ..((self.vertex_end * std::mem::size_of::<Vertex>()) as wgpu::BufferAddress)
-    }
-
     pub(crate) fn index_range(&self) -> Range<u32> {
         (self.indices_start as u32)..(self.indices_end as u32)
     }

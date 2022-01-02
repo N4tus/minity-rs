@@ -1,23 +1,23 @@
+use crate::array_vec::{default_array, optional_array};
+use crate::graphics::bind_group::BindGroupStorage;
 use crate::{
-    AddUniform, CreatePipeline, RenderBackend, Renderer, RendererBuilder, ShaderAction, UiActions,
-    Window, WGPU,
+    ArrayVec, CreatePipeline, RenderBackend, Renderer, RendererBuilder, ShaderAction, UiActions,
+    Window, MAX_BIND_GROUPS, WGPU,
 };
 use egui::epaint::ClippedShape;
 use egui::{CtxRef, Ui};
+use egui_wgpu_backend::wgpu::Device;
 use egui_wgpu_backend::{RenderPass, ScreenDescriptor};
 use egui_winit_platform::Platform;
 use std::cell::RefCell;
-use std::cmp::{max, min};
-use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use tuple_list::TupleList;
-use wgpu::{
-    BindGroup, BindGroupLayout, BindingResource, BufferBinding, BufferSize, Limits,
-    PushConstantRange, RenderPipeline,
-};
+use wgpu::RenderPipeline;
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, KeyboardInput, VirtualKeyCode, WindowEvent};
+
+mod bind_group;
 
 impl<Data> RendererBuilder<Data> for () {
     type Output = ();
@@ -31,16 +31,31 @@ impl<Data> RendererBuilder<Data> for () {
     }
 }
 
-impl<Data> Renderer<Data> for () {}
+impl<Data> Renderer<Data> for () {
+    fn visit(
+        &self,
+        _data: &mut Data,
+        _actions: &mut [ShaderAction],
+        _index: usize,
+        _device: &Device,
+    ) {
+    }
+}
 
 impl<Data, Head, Tail> Renderer<Data> for (Head, Tail)
 where
     Head: Renderer<Data>,
     Tail: Renderer<Data> + TupleList,
 {
-    fn visit<'a>(&'a self, data: &mut Data, actions: &mut [ShaderAction<'a>], index: usize) {
-        self.0.visit(data, actions, index);
-        self.1.visit(data, actions, index + 1);
+    fn visit(
+        &self,
+        data: &mut Data,
+        actions: &mut [ShaderAction],
+        index: usize,
+        device: &wgpu::Device,
+    ) {
+        self.0.visit(data, actions, index, device);
+        self.1.visit(data, actions, index + 1, device);
     }
 
     fn update(&mut self, data: &mut Data) {
@@ -109,17 +124,14 @@ where
     renderer_builders: Option<Renderers>,
     renderers: Option<Renderers::Output>,
     render_pipelines: [Option<RenderPipeline>; <Renderers as TupleList>::TUPLE_LIST_SIZE],
-    #[allow(clippy::type_complexity)]
-    bind_groups: [Option<(&'static str, BindGroup, BindGroupLayout)>;
-        <Renderers as TupleList>::TUPLE_LIST_SIZE],
-    #[allow(clippy::type_complexity)]
-    bind_group_association:
-        [(usize, [usize; wgpu_core::MAX_BIND_GROUPS]); <Renderers as TupleList>::TUPLE_LIST_SIZE],
+    render_pipeline_layouts:
+        [Option<wgpu::PipelineLayout>; <Renderers as TupleList>::TUPLE_LIST_SIZE],
+    bg_association: BindGroupStorage<{ <Renderers as TupleList>::TUPLE_LIST_SIZE }>,
     #[allow(clippy::type_complexity)]
     shader_creation_info: [Option<(
         &'static str,
         &'static [wgpu::VertexBufferLayout<'static>],
-        &'static [&'static str],
+        ArrayVec<&'static str, MAX_BIND_GROUPS>,
         wgpu::PrimitiveTopology,
     )>; <Renderers as TupleList>::TUPLE_LIST_SIZE],
     reload_shader_key: Option<VirtualKeyCode>,
@@ -138,32 +150,6 @@ where
     ) -> Self {
         let state = pollster::block_on(State::new(window));
         let egui_rpass = RenderPass::new(&state.device, state.config.format, 1);
-        #[allow(clippy::type_complexity)]
-        let mut rp: [MaybeUninit<Option<RenderPipeline>>;
-            <Renderers as TupleList>::TUPLE_LIST_SIZE] = MaybeUninit::uninit_array();
-        #[allow(clippy::type_complexity)]
-        let mut bg: [MaybeUninit<Option<(&'static str, BindGroup, BindGroupLayout)>>;
-            <Renderers as TupleList>::TUPLE_LIST_SIZE] = MaybeUninit::uninit_array();
-        #[allow(clippy::type_complexity)]
-        let mut shader_creation_info: [MaybeUninit<
-            Option<(
-                &'static str,
-                &'static [wgpu::VertexBufferLayout<'static>],
-                &'static [&'static str],
-                wgpu::PrimitiveTopology,
-            )>,
-        >;
-            <Renderers as TupleList>::TUPLE_LIST_SIZE] = MaybeUninit::uninit_array();
-        for ((render_pipeline, bind_group), shader_creation_info) in rp
-            .iter_mut()
-            .zip(bg.iter_mut())
-            .zip(shader_creation_info.iter_mut())
-        {
-            render_pipeline.write(None);
-            bind_group.write(None);
-            shader_creation_info.write(None);
-        }
-
         let depth_texture = Self::create_depth_texture(&state.device, &state.config);
 
         Self {
@@ -174,12 +160,11 @@ where
             previous_frame_time: None,
             renderer_builders: Some(renderers),
             renderers: None,
-            render_pipelines: unsafe { MaybeUninit::array_assume_init(rp) },
-            bind_groups: unsafe { MaybeUninit::array_assume_init(bg) },
-            bind_group_association: [(0, [0; wgpu_core::MAX_BIND_GROUPS]);
-                <Renderers as TupleList>::TUPLE_LIST_SIZE],
+            render_pipelines: optional_array(),
+            render_pipeline_layouts: optional_array(),
+            bg_association: BindGroupStorage::empty(),
             reload_shader_key,
-            shader_creation_info: unsafe { MaybeUninit::array_assume_init(shader_creation_info) },
+            shader_creation_info: optional_array(),
         }
     }
 
@@ -193,17 +178,9 @@ where
 
     fn init_shader(&mut self) {
         // create render pipelines
-
-        let mut render_pipelines: [MaybeUninit<Option<RenderPipeline>>;
-            <Renderers as TupleList>::TUPLE_LIST_SIZE] = MaybeUninit::uninit_array();
-        for rp in render_pipelines.iter_mut() {
-            rp.write(None);
-        }
         let mut pipeline_count = 0_usize;
-        let mut render_pipelines = unsafe { MaybeUninit::array_assume_init(render_pipelines) };
-        for s in self.shader_creation_info.iter().flatten() {
-            log::debug!("{}: {:?}", s.0, s.2);
-        }
+        let mut render_pipelines: [Option<wgpu::RenderPipeline>;
+            <Renderers as TupleList>::TUPLE_LIST_SIZE] = optional_array();
         for (index, action) in self.shader_creation_info.iter().enumerate() {
             if let Some((src, layout, uniforms, topology)) = action {
                 match std::fs::read_to_string(src) {
@@ -224,46 +201,18 @@ where
                             SHADER_COMPILATION_ERROR.store(false, Ordering::Relaxed);
                             return;
                         }
+                        log::debug!("create pipeline `{}`", src);
 
-                        let mut bind_group_layouts: [MaybeUninit<&BindGroupLayout>;
-                            wgpu_core::MAX_BIND_GROUPS] = MaybeUninit::uninit_array();
-
-                        let (uniform_size, uniform_indices) =
-                            unsafe { self.bind_group_association.get_unchecked(index) };
-
-                        for uniform_index in 0..(*uniform_size) {
-                            unsafe { bind_group_layouts.get_unchecked_mut(uniform_index) }.write(
-                                &unsafe {
-                                    self.bind_groups
-                                        .get_unchecked(
-                                            *uniform_indices.get_unchecked(uniform_index),
-                                        )
-                                        .as_ref()
-                                        .unwrap_unchecked()
-                                }
-                                .2,
-                            );
-                        }
-
-                        let bind_group_layouts = unsafe {
-                            MaybeUninit::slice_assume_init_ref(
-                                &bind_group_layouts[0..uniforms.len()],
-                            )
+                        let render_pipeline_layout = unsafe {
+                            self.render_pipeline_layouts
+                                .get_unchecked(index)
+                                .as_ref()
+                                .unwrap_unchecked()
                         };
-
-                        log::debug!("create pipeline `{}`: {:?}", src, bind_group_layouts);
-
-                        let render_pipeline_layout = self.state.device.create_pipeline_layout(
-                            &wgpu::PipelineLayoutDescriptor {
-                                label: Some(src),
-                                bind_group_layouts,
-                                push_constant_ranges: &[],
-                            },
-                        );
                         let render_pipeline = self.state.device.create_render_pipeline(
                             &wgpu::RenderPipelineDescriptor {
                                 label: Some(src),
-                                layout: Some(&render_pipeline_layout),
+                                layout: Some(render_pipeline_layout),
                                 vertex: wgpu::VertexState {
                                     module: &shader,
                                     entry_point: "vs_main", // 1.
@@ -493,12 +442,8 @@ where
     }
 
     fn init(&mut self) {
-        let mut actions: [MaybeUninit<ShaderAction>; <Renderers as TupleList>::TUPLE_LIST_SIZE] =
-            MaybeUninit::uninit_array();
-        for action in actions.iter_mut() {
-            action.write(Default::default());
-        }
-        let mut actions = unsafe { MaybeUninit::array_assume_init(actions) };
+        let mut actions: [ShaderAction; <Renderers as TupleList>::TUPLE_LIST_SIZE] =
+            default_array();
         self.renderers = Some(
             self.renderer_builders
                 .take()
@@ -510,90 +455,13 @@ where
             &mut self.data,
             &mut actions,
             0,
+            &self.state.device,
         );
 
-        // gather uniform bind groups
-        for (index, action) in actions.iter().enumerate() {
-            if let Some(AddUniform { name, buffer }) = &action.add_uniform {
-                let mut layout_entries: [MaybeUninit<wgpu::BindGroupLayoutEntry>;
-                    wgpu_core::MAX_BIND_GROUPS] = MaybeUninit::uninit_array();
-                let mut group_entries: [MaybeUninit<wgpu::BindGroupEntry>;
-                    wgpu_core::MAX_BIND_GROUPS] = MaybeUninit::uninit_array();
-                // buffer cannot be larger than wgpu_core::MAX_BIND_GROUPS
-                for (index, entry) in buffer.iter().enumerate() {
-                    unsafe { layout_entries.get_unchecked_mut(index) }.write(
-                        wgpu::BindGroupLayoutEntry {
-                            binding: index as u32,
-                            visibility: entry.stages,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Uniform,
-                                has_dynamic_offset: entry.dynamic,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                    );
-                    let resource = BindingResource::Buffer(BufferBinding {
-                        buffer: entry.buffer,
-                        offset: entry.offset,
-                        size: entry.size,
-                    });
-                    unsafe { group_entries.get_unchecked_mut(index) }.write(wgpu::BindGroupEntry {
-                        binding: index as u32,
-                        resource,
-                    });
-                }
-                let layout_entries =
-                    unsafe { MaybeUninit::slice_assume_init_ref(&layout_entries[0..buffer.len()]) };
-                let group_entries =
-                    unsafe { MaybeUninit::slice_assume_init_ref(&group_entries[0..buffer.len()]) };
-
-                let bind_group_layout =
-                    self.state
-                        .device
-                        .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                            entries: layout_entries,
-                            label: Some(*name),
-                        });
-                let bind_group = self
-                    .state
-                    .device
-                    .create_bind_group(&wgpu::BindGroupDescriptor {
-                        layout: &bind_group_layout,
-                        entries: group_entries,
-                        label: Some(*name),
-                    });
-                *unsafe { self.bind_groups.get_unchecked_mut(index) } =
-                    Some((*name, bind_group, bind_group_layout));
-            }
-        }
-
-        // resolve uniform bind groups
-        for (index, action) in actions.iter().enumerate() {
-            if let Some(CreatePipeline { src, uniforms, .. }) = &action.create_pipeline {
-                if uniforms.len() > wgpu_core::MAX_BIND_GROUPS {
-                    panic!(
-                        "Cannot have more than {} bind groups per shader",
-                        wgpu_core::MAX_BIND_GROUPS
-                    );
-                }
-                let mut uniform_indices = [0_usize; wgpu_core::MAX_BIND_GROUPS];
-                let mut uniform_size = 0_usize;
-                for &uniform_name in *uniforms {
-                    for (uniform_index, uniform) in self.bind_groups.iter().enumerate() {
-                        if let Some((name, _, _)) = uniform {
-                            if uniform_name == *name {
-                                *unsafe { uniform_indices.get_unchecked_mut(uniform_size) } =
-                                    uniform_index;
-                                uniform_size += 1;
-                            }
-                        }
-                    }
-                }
-                *unsafe { self.bind_group_association.get_unchecked_mut(index) } =
-                    (uniforms.len(), uniform_indices);
-            }
-        }
+        let bg_association =
+            BindGroupStorage::<{ <Renderers as TupleList>::TUPLE_LIST_SIZE }>::taking_from_actions(
+                &mut actions,
+            );
 
         for (i, action) in actions.into_iter().enumerate() {
             if let Some(CreatePipeline {
@@ -603,10 +471,20 @@ where
                 topology,
             }) = action.create_pipeline
             {
+                *unsafe { self.render_pipeline_layouts.get_unchecked_mut(i) } =
+                    Some(self.state.device.create_pipeline_layout(
+                        &wgpu::PipelineLayoutDescriptor {
+                            label: Some(src),
+                            bind_group_layouts: &*bg_association.bg_ref_list(i),
+                            push_constant_ranges: &[],
+                        },
+                    ));
+
                 *unsafe { self.shader_creation_info.get_unchecked_mut(i) } =
                     Some((src, layout, uniforms, topology));
             }
         }
+        self.bg_association = bg_association;
         self.init_shader();
     }
 
@@ -639,19 +517,19 @@ where
             });
         });
 
-        renderers.render(
-            &mut self.data,
-            WGPU {
-                depth_view: &self.depth_texture.1,
-                queue: &self.state.queue,
-                command_encoder: &encoder,
-                view: &view,
-                render_pipelines: &self.render_pipelines,
-                uniforms: &self.bind_groups,
-                current_uniforms: &self.bind_group_association,
-                renderer_index: 0,
-            },
-        );
+        // renderers.render(
+        //     &mut self.data,
+        //     WGPU {
+        //         depth_view: &self.depth_texture.1,
+        //         queue: &self.state.queue,
+        //         command_encoder: &encoder,
+        //         view: &view,
+        //         render_pipelines: &self.render_pipelines,
+        //         uniforms: &self.bind_groups,
+        //         current_uniforms: &self.bind_group_association,
+        //         renderer_index: 0,
+        //     },
+        // );
 
         let paint_commands = end_frame(platform);
         let paint_jobs = platform.context().tessellate(paint_commands);

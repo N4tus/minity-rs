@@ -4,6 +4,7 @@
 #![feature(maybe_uninit_slice)]
 #![feature(negative_impls)]
 #![feature(maybe_uninit_extra)]
+#![feature(slice_take)]
 
 use crate::array_vec::ArrayVec;
 use crate::graphics::WGPURenderer;
@@ -17,11 +18,11 @@ use cgmath::SquareMatrix;
 use egui::epaint::ClippedShape;
 use egui::{CtxRef, Ui};
 use egui_winit_platform::Platform;
-use log::log;
 use std::cell::RefCell;
+use std::collections::HashMap;
+use std::ops::Range;
 use std::process::exit;
 use tuple_list::tuple_list;
-use wgpu::{BindGroup, BindGroupLayout, CommandEncoder, Limits, RenderPipeline, TextureView};
 use winit::dpi::PhysicalSize;
 use winit::event::{VirtualKeyCode, WindowEvent};
 
@@ -30,6 +31,8 @@ mod graphics;
 mod objects;
 mod renderer;
 mod window;
+
+const MAX_BIND_GROUPS: usize = wgpu_core::MAX_BIND_GROUPS;
 
 trait RenderBackend {
     fn resize(&mut self, new_size: PhysicalSize<u32>);
@@ -57,82 +60,68 @@ trait RendererBuilder<Data> {
         -> Self::Output;
 }
 
+type Bga = ArrayVec<Range<usize>, MAX_BIND_GROUPS>;
+
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Clone)]
 pub(crate) struct WGPU<'a> {
-    pub(crate) depth_view: &'a TextureView,
+    pub(crate) depth_view: &'a wgpu::TextureView,
     pub(crate) queue: &'a wgpu::Queue,
-    pub(crate) command_encoder: &'a RefCell<CommandEncoder>,
-    pub(crate) view: &'a TextureView,
-    pub(crate) render_pipelines: &'a [Option<RenderPipeline>],
-    uniforms: &'a [Option<(&'static str, BindGroup, BindGroupLayout)>],
-    current_uniforms: &'a [(usize, [usize; wgpu_core::MAX_BIND_GROUPS])],
-    pub(crate) renderer_index: usize,
+    pub(crate) command_encoder: &'a RefCell<wgpu::CommandEncoder>,
+    pub(crate) view: &'a wgpu::TextureView,
+
+    render_pipelines: &'a [Option<wgpu::RenderPipeline>],
+    bind_groups: &'a [&'a wgpu::BindGroup],
+    bind_group_association: &'a [Bga],
+    // uniforms: &'a [Option<(&'static str, wgpu::BindGroup, wgpu::BindGroupLayout)>],
+    // current_uniforms: &'a [(usize, [usize; wgpu_core::MAX_BIND_GROUPS])],
+    renderer_index: usize,
 }
 
 impl<'a> WGPU<'a> {
-    pub(crate) fn current_render_pipeline(&self) -> &'a Option<RenderPipeline> {
-        &self.render_pipelines[self.renderer_index]
+    pub(crate) fn current_render_pipeline(&self) -> &'a Option<wgpu::RenderPipeline> {
+        unsafe { self.render_pipelines.get_unchecked(self.renderer_index) }
     }
-    pub(crate) fn current_uniforms(&self) -> impl Iterator<Item = &'a BindGroup> {
-        let (size, uniform_indices) =
-            unsafe { self.current_uniforms.get_unchecked(self.renderer_index) };
-        (0..*size).map(|i| {
-            &unsafe {
-                self.uniforms
-                    .get_unchecked(*uniform_indices.get_unchecked(i))
-                    .as_ref()
-                    .unwrap_unchecked()
-            }
-            .1
-        })
-    }
-}
-
-const CAP: usize = wgpu_core::MAX_BIND_GROUPS;
-
-struct BufferEntry<'a> {
-    buffer: &'a wgpu::Buffer,
-    stages: wgpu::ShaderStages,
-    offset: wgpu::BufferAddress,
-    size: Option<wgpu::BufferSize>,
-    dynamic: bool,
-}
-
-impl<'a> BufferEntry<'a> {
-    fn static_buf(buffer: &'a wgpu::Buffer, stages: wgpu::ShaderStages) -> Self {
-        Self {
-            buffer,
-            stages,
-            offset: 0,
-            size: None,
-            dynamic: false,
+    pub(crate) fn current_uniforms(&self) -> impl Iterator<Item = &'a [&'a wgpu::BindGroup]> {
+        unsafe {
+            self.bind_group_association
+                .get_unchecked(self.renderer_index)
         }
+        .iter()
+        .cloned()
+        .map(|idx| unsafe { self.bind_groups.get_unchecked(idx) })
     }
 }
 
-struct AddUniform<'a> {
+struct CreateBindGroup {
     name: &'static str,
-    buffer: ArrayVec<BufferEntry<'a>, CAP>,
+    groups: Vec<wgpu::BindGroup>,
+    layout: wgpu::BindGroupLayout,
 }
 
 struct CreatePipeline {
     src: &'static str,
     layout: &'static [wgpu::VertexBufferLayout<'static>],
-    uniforms: &'static [&'static str],
+    uniforms: ArrayVec<&'static str, MAX_BIND_GROUPS>,
     topology: wgpu::PrimitiveTopology,
 }
 
 #[derive(Default)]
-struct ShaderAction<'a> {
-    add_uniform: Option<AddUniform<'a>>,
+struct ShaderAction {
+    create_bind_groups: Vec<CreateBindGroup>,
     create_pipeline: Option<CreatePipeline>,
 }
 
 trait Renderer<Data> {
     /// do never override this method
-    fn visit<'a>(&'a self, data: &mut Data, actions: &mut [ShaderAction<'a>], index: usize) {
-        *unsafe { actions.get_unchecked_mut(index) } = self.shader(data);
+    fn visit(
+        &self,
+        data: &mut Data,
+        actions: &mut [ShaderAction],
+        index: usize,
+        device: &wgpu::Device,
+    ) {
+        *unsafe { actions.get_unchecked_mut(index) } = self.shader(data, device);
     }
     fn update(&mut self, _data: &mut Data) {}
     fn render(&mut self, _data: &mut Data, _wgpu: WGPU) {}
@@ -147,7 +136,7 @@ trait Renderer<Data> {
     fn input(&mut self, _data: &mut Data, _event: &WindowEvent) -> bool {
         false
     }
-    fn shader(&self, _data: &mut Data) -> ShaderAction {
+    fn shader(&self, _data: &mut Data, _device: &wgpu::Device) -> ShaderAction {
         Default::default()
     }
     fn resize(&mut self, _data: &mut Data, _size: PhysicalSize<u32>) {}
@@ -172,7 +161,7 @@ struct App {
 
 fn main() {
     env_logger::init();
-    if Limits::default().min_uniform_buffer_offset_alignment
+    if wgpu::Limits::default().min_uniform_buffer_offset_alignment
         != UNIFORM_ALIGNMENT.try_into().unwrap()
     {
         log::error!(

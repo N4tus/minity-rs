@@ -1,19 +1,13 @@
-use crate::objects::{MaterialData, MaterialDataPadding, Vertex, MAX_MATERIALS};
+use crate::objects::{MaterialData, MaterialDataPadding, Vertex};
 use crate::{
-    AddUniform, App, ArrayVec, BufferEntry, CreatePipeline, Dirty, Renderer, RendererBuilder,
+    array_vec, App, CreateBindGroup, CreatePipeline, Dirty, Renderer, RendererBuilder,
     ShaderAction, UiActions, WGPU,
 };
 use cgmath::{InnerSpace, Rotation, Rotation3, SquareMatrix};
-use egui::Key::{A, B};
 use egui::{CtxRef, Ui, Widget};
 use egui_wgpu_backend::wgpu::Device;
-use itertools::Itertools;
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
-use wgpu::BlendOperation::Add;
-use wgpu::{
-    BufferDescriptor, BufferUsages, Color, DynamicOffset, ShaderStages, VertexBufferLayout,
-    MAP_ALIGNMENT,
-};
+use wgpu::{BufferDescriptor, BufferUsages, Color, DynamicOffset, VertexBufferLayout};
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 
@@ -116,15 +110,16 @@ impl Renderer<App> for ModelRenderer {
                 });
 
                 render_pass.set_pipeline(pipeline); // 2.
-                render_pass.set_bind_group(0, uniforms.next().unwrap(), &[]);
-                let material_bind_group = uniforms.next().unwrap();
+                render_pass.set_bind_group(0, uniforms.next().unwrap()[0], &[]);
                 render_pass
                     .set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
 
                 render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+
+                let material_uniform = uniforms.next().unwrap()[0];
                 for (index, group) in model.groups.iter().enumerate() {
                     let offset = index * std::mem::size_of::<MaterialDataPadding>();
-                    render_pass.set_bind_group(1, material_bind_group, &[offset as DynamicOffset]);
+                    render_pass.set_bind_group(1, material_uniform, &[offset as DynamicOffset]);
                     render_pass.draw_indexed(group.index_range(), 0, 0..1);
                 }
             }
@@ -153,24 +148,42 @@ impl Renderer<App> for ModelRenderer {
         });
     }
 
-    fn shader(&self, _data: &mut App) -> ShaderAction {
-        let mut buffer = ArrayVec::new();
-        buffer.push(BufferEntry {
-            buffer: &self.material_buffer,
-            stages: wgpu::ShaderStages::VERTEX_FRAGMENT,
-            offset: 0,
-            size: wgpu::BufferSize::new(std::mem::size_of::<MaterialData>() as u64),
-            dynamic: true,
+    fn shader(&self, _data: &mut App, device: &wgpu::Device) -> ShaderAction {
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("material bind group layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: true,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("material bind group"),
+            layout: &layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &self.material_buffer,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(std::mem::size_of::<MaterialData>() as u64),
+                }),
+            }],
         });
         ShaderAction {
-            add_uniform: Some(AddUniform {
+            create_bind_groups: vec![CreateBindGroup {
                 name: "material",
-                buffer,
-            }),
+                groups: vec![group],
+                layout,
+            }],
             create_pipeline: Some(CreatePipeline {
                 src: "shader_src/model.wgsl",
                 layout: VERTEX_LAYOUT,
-                uniforms: &["camera", "material"],
+                uniforms: array_vec!["camera", "material"],
                 topology: wgpu::PrimitiveTopology::TriangleList,
             }),
         }
@@ -345,17 +358,34 @@ impl Renderer<App> for Camera {
         }
     }
 
-    fn shader(&self, _data: &mut App) -> ShaderAction {
-        let mut buffer = ArrayVec::new();
-        buffer.push(BufferEntry::static_buf(
-            &self.uniform,
-            wgpu::ShaderStages::VERTEX,
-        ));
+    fn shader(&self, _data: &mut App, device: &wgpu::Device) -> ShaderAction {
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("camera bind group layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("camera bind group"),
+            layout: &layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: self.uniform.as_entire_binding(),
+            }],
+        });
         ShaderAction {
-            add_uniform: Some(AddUniform {
+            create_bind_groups: vec![CreateBindGroup {
                 name: "camera",
-                buffer,
-            }),
+                groups: vec![group],
+                layout,
+            }],
             create_pipeline: None,
         }
     }
@@ -454,7 +484,7 @@ impl Renderer<App> for LightRenderer {
             });
 
             render_pass.set_pipeline(pipeline);
-            render_pass.set_bind_group(0, uniforms.next().unwrap(), &[]);
+            render_pass.set_bind_group(0, uniforms.next().unwrap()[0], &[]);
             render_pass.draw(0..4, 0..1);
         }
     }
@@ -484,21 +514,38 @@ impl Renderer<App> for LightRenderer {
         });
     }
 
-    fn shader(&self, _data: &mut App) -> ShaderAction {
-        let mut buffer = ArrayVec::new();
-        buffer.push(BufferEntry::static_buf(
-            &self.uniform,
-            wgpu::ShaderStages::VERTEX,
-        ));
+    fn shader(&self, _data: &mut App, device: &wgpu::Device) -> ShaderAction {
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("light bind group layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("light bind group"),
+            layout: &layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(self.uniform.as_entire_buffer_binding()),
+            }],
+        });
         ShaderAction {
-            add_uniform: Some(AddUniform {
+            create_bind_groups: vec![CreateBindGroup {
                 name: "light",
-                buffer,
-            }),
+                groups: vec![group],
+                layout,
+            }],
             create_pipeline: Some(CreatePipeline {
                 src: "shader_src/light.wgsl",
                 layout: &[],
-                uniforms: &["light"],
+                uniforms: array_vec!["light"],
                 topology: wgpu::PrimitiveTopology::TriangleStrip,
             }),
         }
@@ -592,26 +639,43 @@ impl Renderer<App> for RayTracer {
             });
 
             render_pass.set_pipeline(pipeline);
-            render_pass.set_bind_group(0, uniforms.next().unwrap(), &[]);
+            render_pass.set_bind_group(0, uniforms.next().unwrap()[0], &[]);
             render_pass.draw(0..4, 0..1);
         }
     }
 
-    fn shader(&self, _data: &mut App) -> ShaderAction {
-        let mut buffer = ArrayVec::new();
-        buffer.push(BufferEntry::static_buf(
-            &self.uniform,
-            wgpu::ShaderStages::FRAGMENT,
-        ));
+    fn shader(&self, _data: &mut App, device: &wgpu::Device) -> ShaderAction {
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ray_tracer bind group layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ray_tracer bind group"),
+            layout: &layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(self.uniform.as_entire_buffer_binding()),
+            }],
+        });
         ShaderAction {
-            add_uniform: Some(AddUniform {
+            create_bind_groups: vec![CreateBindGroup {
                 name: "ray_tracer",
-                buffer,
-            }),
+                groups: vec![group],
+                layout,
+            }],
             create_pipeline: Some(CreatePipeline {
                 src: "shader_src/ray_tracer.wgsl",
                 layout: &[],
-                uniforms: &["ray_tracer"],
+                uniforms: array_vec!["ray_tracer"],
                 topology: wgpu::PrimitiveTopology::TriangleStrip,
             }),
         }
