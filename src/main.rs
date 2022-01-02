@@ -5,6 +5,7 @@
 #![feature(negative_impls)]
 #![feature(maybe_uninit_extra)]
 #![feature(slice_take)]
+#![feature(allocator_api)]
 
 use crate::array_vec::ArrayVec;
 use crate::graphics::WGPURenderer;
@@ -19,7 +20,6 @@ use egui::epaint::ClippedShape;
 use egui::{CtxRef, Ui};
 use egui_winit_platform::Platform;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::ops::Range;
 use std::process::exit;
 use tuple_list::tuple_list;

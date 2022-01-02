@@ -5,9 +5,9 @@ use std::ops::Range;
 
 pub(crate) struct BindGroupStorage<const RC: usize> {
     ///
-    bind_groups: Vec<wgpu::BindGroup>,
+    pub(crate) bind_groups: Vec<wgpu::BindGroup>,
     bind_group_layouts: Vec<wgpu::BindGroupLayout>,
-    bind_group_association: [ArrayVec<Range<usize>, MAX_BIND_GROUPS>; RC],
+    pub(crate) bind_group_association: [ArrayVec<Range<usize>, MAX_BIND_GROUPS>; RC],
     bind_group_layout_association: [ArrayVec<usize, MAX_BIND_GROUPS>; RC],
 }
 
@@ -92,5 +92,9 @@ impl<const RC: usize> BindGroupStorage<RC> {
             res.push(bgl);
         }
         res
+    }
+
+    pub(crate) fn aligned_size_of_ref_bind_groups(&self) -> usize {
+        std::mem::size_of::<&wgpu::BindGroup>() * self.bind_groups.len()
     }
 }

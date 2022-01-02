@@ -5,7 +5,7 @@ use image::{DynamicImage, ImageError, ImageFormat};
 use native_dialog::FileDialog;
 use std::fs::File;
 use std::io::{BufReader, Error};
-use std::ops::{Range, RangeBounds};
+use std::ops::Range;
 use std::path::PathBuf;
 use tobj::LoadOptions;
 

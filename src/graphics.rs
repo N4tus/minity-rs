@@ -5,8 +5,6 @@ use crate::{
     Window, MAX_BIND_GROUPS, WGPU,
 };
 use egui::epaint::ClippedShape;
-use egui::{CtxRef, Ui};
-use egui_wgpu_backend::wgpu::Device;
 use egui_wgpu_backend::{RenderPass, ScreenDescriptor};
 use egui_winit_platform::Platform;
 use std::cell::RefCell;
@@ -18,100 +16,7 @@ use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, KeyboardInput, VirtualKeyCode, WindowEvent};
 
 mod bind_group;
-
-impl<Data> RendererBuilder<Data> for () {
-    type Output = ();
-
-    fn build(
-        self,
-        _data: &mut Data,
-        _device: &wgpu::Device,
-        _size: PhysicalSize<u32>,
-    ) -> Self::Output {
-    }
-}
-
-impl<Data> Renderer<Data> for () {
-    fn visit(
-        &self,
-        _data: &mut Data,
-        _actions: &mut [ShaderAction],
-        _index: usize,
-        _device: &Device,
-    ) {
-    }
-}
-
-impl<Data, Head, Tail> Renderer<Data> for (Head, Tail)
-where
-    Head: Renderer<Data>,
-    Tail: Renderer<Data> + TupleList,
-{
-    fn visit(
-        &self,
-        data: &mut Data,
-        actions: &mut [ShaderAction],
-        index: usize,
-        device: &wgpu::Device,
-    ) {
-        self.0.visit(data, actions, index, device);
-        self.1.visit(data, actions, index + 1, device);
-    }
-
-    fn update(&mut self, data: &mut Data) {
-        self.0.update(data);
-        self.1.update(data);
-    }
-
-    fn render(&mut self, data: &mut Data, mut wgpu: WGPU) {
-        self.0.render(data, wgpu.clone());
-        wgpu.renderer_index += 1;
-        self.1.render(data, wgpu);
-    }
-
-    fn render_ui(
-        &mut self,
-        data: &mut Data,
-        ctx: &CtxRef,
-        menu_ui: &mut Ui,
-        actions: &mut UiActions,
-    ) {
-        self.0.render_ui(data, ctx, menu_ui, actions);
-        self.1.render_ui(data, ctx, menu_ui, actions);
-    }
-
-    fn input(&mut self, data: &mut Data, event: &WindowEvent) -> bool {
-        let l = self.0.input(data, event);
-        let r = self.1.input(data, event);
-        l || r
-    }
-
-    fn resize(&mut self, data: &mut Data, size: PhysicalSize<u32>) {
-        self.0.resize(data, size);
-        self.1.resize(data, size);
-    }
-}
-
-impl<Data, Head, Tail> RendererBuilder<Data> for (Head, Tail)
-where
-    Head: RendererBuilder<Data>,
-    Tail: RendererBuilder<Data> + TupleList,
-    <Tail as RendererBuilder<Data>>::Output: TupleList,
-{
-    type Output = (Head::Output, Tail::Output);
-
-    fn build(
-        self,
-        data: &mut Data,
-        device: &wgpu::Device,
-        size: PhysicalSize<u32>,
-    ) -> Self::Output {
-        (
-            self.0.build(data, device, size),
-            self.1.build(data, device, size),
-        )
-    }
-}
+mod renderer_impls;
 
 pub(crate) struct WGPURenderer<Data: 'static, Renderers: RendererBuilder<Data> + TupleList>
 where
@@ -127,6 +32,7 @@ where
     render_pipeline_layouts:
         [Option<wgpu::PipelineLayout>; <Renderers as TupleList>::TUPLE_LIST_SIZE],
     bg_association: BindGroupStorage<{ <Renderers as TupleList>::TUPLE_LIST_SIZE }>,
+    bind_group_ref_storage: bumpalo::Bump,
     #[allow(clippy::type_complexity)]
     shader_creation_info: [Option<(
         &'static str,
@@ -163,6 +69,7 @@ where
             render_pipelines: optional_array(),
             render_pipeline_layouts: optional_array(),
             bg_association: BindGroupStorage::empty(),
+            bind_group_ref_storage: bumpalo::Bump::new(),
             reload_shader_key,
             shader_creation_info: optional_array(),
         }
@@ -458,10 +365,7 @@ where
             &self.state.device,
         );
 
-        let bg_association =
-            BindGroupStorage::<{ <Renderers as TupleList>::TUPLE_LIST_SIZE }>::taking_from_actions(
-                &mut actions,
-            );
+        let bg_association = BindGroupStorage::taking_from_actions(&mut actions);
 
         for (i, action) in actions.into_iter().enumerate() {
             if let Some(CreatePipeline {
@@ -485,6 +389,8 @@ where
             }
         }
         self.bg_association = bg_association;
+        self.bind_group_ref_storage =
+            bumpalo::Bump::with_capacity(self.bg_association.aligned_size_of_ref_bind_groups());
         self.init_shader();
     }
 
@@ -517,19 +423,28 @@ where
             });
         });
 
-        // renderers.render(
-        //     &mut self.data,
-        //     WGPU {
-        //         depth_view: &self.depth_texture.1,
-        //         queue: &self.state.queue,
-        //         command_encoder: &encoder,
-        //         view: &view,
-        //         render_pipelines: &self.render_pipelines,
-        //         uniforms: &self.bind_groups,
-        //         current_uniforms: &self.bind_group_association,
-        //         renderer_index: 0,
-        //     },
-        // );
+        {
+            let mut bind_groups_ref = Vec::new_in(&self.bind_group_ref_storage);
+            for bg in &self.bg_association.bind_groups {
+                bind_groups_ref.push(bg);
+            }
+
+            renderers.render(
+                &mut self.data,
+                WGPU {
+                    depth_view: &self.depth_texture.1,
+                    queue: &self.state.queue,
+                    command_encoder: &encoder,
+                    view: &view,
+                    render_pipelines: &self.render_pipelines,
+                    bind_groups: bind_groups_ref.as_slice(),
+                    bind_group_association: &self.bg_association.bind_group_association,
+                    renderer_index: 0,
+                },
+            );
+        }
+
+        self.bind_group_ref_storage.reset();
 
         let paint_commands = end_frame(platform);
         let paint_jobs = platform.context().tessellate(paint_commands);
