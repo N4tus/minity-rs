@@ -1,5 +1,5 @@
 use bytemuck::{Pod, Zeroable};
-use std::mem::MaybeUninit;
+use std::mem::{ManuallyDrop, MaybeUninit};
 
 pub struct ArrayVec<T, const CAP: usize> {
     data: [MaybeUninit<T>; CAP],
@@ -79,6 +79,83 @@ impl<T, const CAP: usize> std::ops::DerefMut for ArrayVec<T, CAP> {
 impl<T, const CAP: usize> Default for ArrayVec<T, CAP> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+pub struct ArrayVecIter<T, const CAP: usize> {
+    data: [MaybeUninit<T>; CAP],
+    len: usize,
+    idx: usize,
+}
+
+impl<T, const CAP: usize> Iterator for ArrayVecIter<T, CAP> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.idx < self.len {
+            let item = unsafe {
+                MaybeUninit::assume_init(std::mem::replace(
+                    self.data.get_unchecked_mut(self.idx),
+                    MaybeUninit::uninit(),
+                ))
+            };
+            self.idx += 1;
+            Some(item)
+        } else {
+            None
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.len - self.idx, Some(self.len - self.idx))
+    }
+
+    fn count(self) -> usize
+    where
+        Self: Sized,
+    {
+        self.len - self.idx
+    }
+}
+
+impl<T, const CAP: usize> Drop for ArrayVecIter<T, CAP> {
+    fn drop(&mut self) {
+        for d in &mut self.data[self.idx..self.len] {
+            unsafe { d.assume_init_drop() }
+        }
+    }
+}
+
+impl<T, const CAP: usize> IntoIterator for ArrayVec<T, CAP> {
+    type Item = T;
+    type IntoIter = ArrayVecIter<T, CAP>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        let mut me = ManuallyDrop::new(self);
+        let data = std::mem::replace(&mut me.data, MaybeUninit::uninit_array());
+        ArrayVecIter {
+            data,
+            len: me.len,
+            idx: 0,
+        }
+    }
+}
+
+impl<'i, T, const CAP: usize> IntoIterator for &'i ArrayVec<T, CAP> {
+    type Item = <&'i [T] as IntoIterator>::Item;
+    type IntoIter = <&'i [T] as IntoIterator>::IntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'i, T, const CAP: usize> IntoIterator for &'i mut ArrayVec<T, CAP> {
+    type Item = <&'i mut [T] as IntoIterator>::Item;
+    type IntoIter = <&'i mut [T] as IntoIterator>::IntoIter;
+
+    fn into_iter(mut self) -> Self::IntoIter {
+        self.iter_mut()
     }
 }
 
