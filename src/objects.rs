@@ -269,9 +269,6 @@ fn load_model_with_path(path: impl Into<PathBuf>) -> Result<Model, LoadError> {
                 ],
             });
         }
-        // index_buffer_data
-        //     [current_index_buffer_index..(current_index_buffer_index + model.mesh.indices.len())]
-        //     .copy_from_slice(model.mesh.indices.as_slice());
 
         groups.push(Group {
             indices_start: current_index_buffer_index,
@@ -290,6 +287,14 @@ fn load_model_with_path(path: impl Into<PathBuf>) -> Result<Model, LoadError> {
     let mut materials = ArrayVec::new();
     let mut material_data = ArrayVec::new();
     for material in material.into_iter().take(MAX_MATERIALS) {
+        log::info!(
+            "Material `{}` images:\n\tambient: {}\n\tdiffuse: {}\n\tspecular: {}\n\tshininess: {}",
+            material.name,
+            material.ambient_texture,
+            material.diffuse_texture,
+            material.specular_texture,
+            material.shininess_texture
+        );
         let ambient_texture = if !material.ambient_texture.is_empty() {
             Some(image::load(
                 BufReader::new(File::open(&material.ambient_texture)?),
@@ -298,7 +303,7 @@ fn load_model_with_path(path: impl Into<PathBuf>) -> Result<Model, LoadError> {
         } else {
             None
         };
-        let diffuse_texture = if !material.ambient_texture.is_empty() {
+        let diffuse_texture = if !material.diffuse_texture.is_empty() {
             Some(image::load(
                 BufReader::new(File::open(&material.diffuse_texture)?),
                 ImageFormat::Png,
@@ -306,7 +311,7 @@ fn load_model_with_path(path: impl Into<PathBuf>) -> Result<Model, LoadError> {
         } else {
             None
         };
-        let specular_texture = if !material.ambient_texture.is_empty() {
+        let specular_texture = if !material.specular_texture.is_empty() {
             Some(image::load(
                 BufReader::new(File::open(&material.specular_texture)?),
                 ImageFormat::Png,
@@ -314,7 +319,7 @@ fn load_model_with_path(path: impl Into<PathBuf>) -> Result<Model, LoadError> {
         } else {
             None
         };
-        let shininess_texture = if !material.ambient_texture.is_empty() {
+        let shininess_texture = if !material.shininess_texture.is_empty() {
             Some(image::load(
                 BufReader::new(File::open(&material.shininess_texture)?),
                 ImageFormat::Png,
