@@ -3,6 +3,7 @@ use bytemuck::{Pod, Zeroable};
 use cgmath::{Matrix4, SquareMatrix, Vector3};
 use image::{DynamicImage, ImageError, ImageFormat};
 use native_dialog::FileDialog;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Error};
 use std::ops::Range;
@@ -73,16 +74,16 @@ pub(crate) struct Material {
     /// Material name as specified in the `MTL` file.
     pub name: String,
 
-    /// Ambient texture file for the material
-    pub ambient_texture: Option<DynamicImage>,
-    /// Diffuse texture file for the material.
-    pub diffuse_texture: Option<DynamicImage>,
-    /// Specular texture file for the material.
-    pub specular_texture: Option<DynamicImage>,
-    // ///Normal map texture file for the material.
+    /// Ambient texture index for the material
+    pub ambient_texture: Option<usize>,
+    /// Diffuse texture index for the material.
+    pub diffuse_texture: Option<usize>,
+    /// Specular texture index for the material.
+    pub specular_texture: Option<usize>,
+    // ///Normal map texture index for the material.
     // pub normal_texture: DynamicImage,
-    /// Shininess map texture file for the material.
-    pub shininess_texture: Option<DynamicImage>,
+    /// Shininess map texture index for the material.
+    pub shininess_texture: Option<usize>,
 }
 
 pub(crate) struct MaterialInfo {
@@ -139,6 +140,7 @@ pub(crate) struct Model {
     pub(crate) indices: Vec<u32>,
     pub(crate) groups: Vec<Group>,
     pub(crate) materials: MaterialInfo,
+    pub(crate) images_storage: Vec<DynamicImage>,
 }
 
 impl Group {
@@ -285,6 +287,8 @@ fn load_model_with_path(path: impl Into<PathBuf>) -> Result<Model, LoadError> {
     }
 
     let mut materials = ArrayVec::new();
+    let mut images_storage = Vec::new();
+    let mut images_set = HashMap::new();
     let mut material_data = ArrayVec::new();
     for material in material.into_iter().take(MAX_MATERIALS) {
         log::info!(
@@ -296,34 +300,62 @@ fn load_model_with_path(path: impl Into<PathBuf>) -> Result<Model, LoadError> {
             material.shininess_texture
         );
         let ambient_texture = if !material.ambient_texture.is_empty() {
-            Some(image::load(
-                BufReader::new(File::open(&material.ambient_texture)?),
-                ImageFormat::Png,
-            )?)
+            if let Some(&idx) = images_set.get(&material.ambient_texture) {
+                Some(idx)
+            } else {
+                let img_idx = images_storage.len();
+                images_storage.push(image::load(
+                    BufReader::new(File::open(&material.ambient_texture)?),
+                    ImageFormat::Png,
+                )?);
+                images_set.insert(material.ambient_texture, img_idx);
+                Some(img_idx)
+            }
         } else {
             None
         };
         let diffuse_texture = if !material.diffuse_texture.is_empty() {
-            Some(image::load(
-                BufReader::new(File::open(&material.diffuse_texture)?),
-                ImageFormat::Png,
-            )?)
+            if let Some(&idx) = images_set.get(&material.diffuse_texture) {
+                Some(idx)
+            } else {
+                let img_idx = images_storage.len();
+                images_storage.push(image::load(
+                    BufReader::new(File::open(&material.diffuse_texture)?),
+                    ImageFormat::Png,
+                )?);
+                images_set.insert(material.diffuse_texture, img_idx);
+                Some(img_idx)
+            }
         } else {
             None
         };
         let specular_texture = if !material.specular_texture.is_empty() {
-            Some(image::load(
-                BufReader::new(File::open(&material.specular_texture)?),
-                ImageFormat::Png,
-            )?)
+            if let Some(&idx) = images_set.get(&material.specular_texture) {
+                Some(idx)
+            } else {
+                let img_idx = images_storage.len();
+                images_storage.push(image::load(
+                    BufReader::new(File::open(&material.specular_texture)?),
+                    ImageFormat::Png,
+                )?);
+                images_set.insert(material.specular_texture, img_idx);
+                Some(img_idx)
+            }
         } else {
             None
         };
         let shininess_texture = if !material.shininess_texture.is_empty() {
-            Some(image::load(
-                BufReader::new(File::open(&material.shininess_texture)?),
-                ImageFormat::Png,
-            )?)
+            if let Some(&idx) = images_set.get(&material.shininess_texture) {
+                Some(idx)
+            } else {
+                let img_idx = images_storage.len();
+                images_storage.push(image::load(
+                    BufReader::new(File::open(&material.shininess_texture)?),
+                    ImageFormat::Png,
+                )?);
+                images_set.insert(material.shininess_texture, img_idx);
+                Some(img_idx)
+            }
         } else {
             None
         };
@@ -353,6 +385,7 @@ fn load_model_with_path(path: impl Into<PathBuf>) -> Result<Model, LoadError> {
             shader_data: material_data,
             material_info: materials,
         },
+        images_storage,
     })
 }
 

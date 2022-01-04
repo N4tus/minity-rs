@@ -35,10 +35,11 @@ impl<T, const CAP: usize> ArrayVec<T, CAP> {
         }
     }
 
+    #[warn(unsafe_op_in_unsafe_fn)]
     pub unsafe fn get_unchecked(&self, index: usize) -> &T {
         unsafe { MaybeUninit::assume_init_ref(self.data.get_unchecked(index)) }
     }
-
+    #[warn(unsafe_op_in_unsafe_fn)]
     pub unsafe fn get_unchecked_mut(&mut self, index: usize) -> &mut T {
         unsafe { MaybeUninit::assume_init_mut(self.data.get_unchecked_mut(index)) }
     }
@@ -154,7 +155,7 @@ impl<'i, T, const CAP: usize> IntoIterator for &'i mut ArrayVec<T, CAP> {
     type Item = <&'i mut [T] as IntoIterator>::Item;
     type IntoIter = <&'i mut [T] as IntoIterator>::IntoIter;
 
-    fn into_iter(mut self) -> Self::IntoIter {
+    fn into_iter(self) -> Self::IntoIter {
         self.iter_mut()
     }
 }

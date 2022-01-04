@@ -6,6 +6,8 @@ use crate::{
 use cgmath::{InnerSpace, Rotation, Rotation3, SquareMatrix};
 use egui::{CtxRef, Ui, Widget};
 use egui_wgpu_backend::wgpu::Device;
+use image::GenericImageView;
+use itertools::Itertools;
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::{BufferDescriptor, BufferUsages, Color, DynamicOffset, VertexBufferLayout};
 use winit::dpi::PhysicalSize;
@@ -17,6 +19,7 @@ pub(crate) struct ModelRenderer {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     material_buffer: wgpu::Buffer,
+    images: Vec<(wgpu::Texture, wgpu::TextureView, wgpu::Sampler)>,
 }
 
 pub(crate) struct ModelRendererBuilder;
@@ -28,17 +31,56 @@ impl RendererBuilder<App> for ModelRendererBuilder {
         self,
         data: &mut App,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         _size: PhysicalSize<u32>,
     ) -> Self::Output {
-        let (vertex_buffer, index_buffer, material_buffer) = {
-            let (data, indices, mat_count) = if let Some(m) = &data.model {
+        let (vertex_buffer, index_buffer, material_buffer, images) = {
+            let (data, indices, mat_count, images) = if let Some(m) = &data.model {
                 (
                     bytemuck::cast_slice(m.vertices.as_slice()),
                     bytemuck::cast_slice(m.indices.as_slice()),
                     m.materials.shader_data.len(),
+                    m.images_storage
+                        .iter()
+                        .map(|img| {
+                            let tex = device.create_texture_with_data(
+                                queue,
+                                &wgpu::TextureDescriptor {
+                                    label: Some("image"),
+                                    size: wgpu::Extent3d {
+                                        width: img.width(),
+                                        height: img.height(),
+                                        depth_or_array_layers: 1,
+                                    },
+                                    mip_level_count: 1,
+                                    sample_count: 1,
+                                    dimension: wgpu::TextureDimension::D2,
+                                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                                    usage: wgpu::TextureUsages::COPY_DST
+                                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                                },
+                                img.as_rgba8().unwrap(),
+                            );
+                            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+                            (
+                                tex,
+                                view,
+                                device.create_sampler(&wgpu::SamplerDescriptor {
+                                    label: Some("image sampler"),
+                                    address_mode_u: wgpu::AddressMode::ClampToEdge,
+                                    address_mode_v: wgpu::AddressMode::ClampToEdge,
+                                    address_mode_w: wgpu::AddressMode::ClampToEdge,
+                                    mag_filter: wgpu::FilterMode::Linear,
+                                    min_filter: wgpu::FilterMode::Nearest,
+                                    mipmap_filter: wgpu::FilterMode::Nearest,
+                                    ..Default::default()
+                                }),
+                            )
+                        })
+                        .collect_vec(),
                 )
             } else {
-                ([0u8; 0].as_slice(), [0u8; 0].as_slice(), 1)
+                ([0u8; 0].as_slice(), [0u8; 0].as_slice(), 1, vec![])
             };
             (
                 device.create_buffer_init(&BufferInitDescriptor {
@@ -58,6 +100,7 @@ impl RendererBuilder<App> for ModelRendererBuilder {
                         as wgpu::BufferAddress,
                     mapped_at_creation: false,
                 }),
+                images,
             )
         };
         data.dirty.insert(Dirty::MATERIAL);
@@ -65,6 +108,7 @@ impl RendererBuilder<App> for ModelRendererBuilder {
             vertex_buffer,
             index_buffer,
             material_buffer,
+            images,
         }
     }
 }
@@ -174,6 +218,27 @@ impl Renderer<App> for ModelRenderer {
                 }),
             }],
         });
+        let binding = &mut 0_u32;
+        let mut tex_bgle = || {
+            *binding += 1;
+            wgpu::BindGroupLayoutEntry {
+                binding: *binding - 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            }
+        };
+        let image_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("image bind group layout"),
+                // ambient diffuse specular shininess
+                entries: &[tex_bgle(), tex_bgle(), tex_bgle(), tex_bgle()],
+            });
+        // let image_group = data.model.map(|model| model.materials.material_info.iter);
         ShaderAction {
             create_bind_groups: vec![CreateBindGroup {
                 name: "material",
@@ -229,7 +294,13 @@ pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::new(
 impl RendererBuilder<App> for CameraBuilder {
     type Output = Camera;
 
-    fn build(self, data: &mut App, device: &wgpu::Device, size: PhysicalSize<u32>) -> Self::Output {
+    fn build(
+        self,
+        data: &mut App,
+        device: &wgpu::Device,
+        _queue: &wgpu::Queue,
+        size: PhysicalSize<u32>,
+    ) -> Self::Output {
         let aspect = size.width as f32 / size.height as f32;
         let view = cgmath::Matrix4::look_at_rh(self.eye, self.target, cgmath::Vector3::unit_y());
         let proj = cgmath::perspective(cgmath::Deg(self.fovy), aspect, self.znear, self.zfar);
@@ -416,7 +487,13 @@ pub(crate) struct LightRenderer {
 impl RendererBuilder<App> for LightRendererBuilder {
     type Output = LightRenderer;
 
-    fn build(self, data: &mut App, device: &Device, size: PhysicalSize<u32>) -> Self::Output {
+    fn build(
+        self,
+        data: &mut App,
+        device: &Device,
+        _queue: &wgpu::Queue,
+        size: PhysicalSize<u32>,
+    ) -> Self::Output {
         // The LightRenderer is built after the CameraRenderer, so data.proj has a proper value
         assert!(!data.view_proj.is_identity());
         let uniform_data = LightUniform {
@@ -573,7 +650,13 @@ pub(crate) struct RayTracer {
 impl RendererBuilder<App> for RayTracerBuilder {
     type Output = RayTracer;
 
-    fn build(self, data: &mut App, device: &Device, _size: PhysicalSize<u32>) -> Self::Output {
+    fn build(
+        self,
+        data: &mut App,
+        device: &Device,
+        _queue: &wgpu::Queue,
+        _size: PhysicalSize<u32>,
+    ) -> Self::Output {
         let object_data = RayTracerObjects {
             inverse_view_proj: (OPENGL_TO_WGPU_MATRIX * data.view_proj)
                 .invert()

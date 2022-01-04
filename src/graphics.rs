@@ -89,7 +89,7 @@ where
         let mut render_pipelines: [Option<wgpu::RenderPipeline>;
             <Renderers as TupleList>::TUPLE_LIST_SIZE] = optional_array();
         for (index, action) in self.shader_creation_info.iter().enumerate() {
-            if let Some((src, layout, uniforms, topology)) = action {
+            if let Some((src, layout, _, topology)) = action {
                 match std::fs::read_to_string(src) {
                     Ok(shader_data) => {
                         // arming shader compilation error handler.
@@ -355,7 +355,12 @@ where
             self.renderer_builders
                 .take()
                 .expect("WGPURenderer::renderer_builder was None on init")
-                .build(&mut self.data, &self.state.device, self.state.size),
+                .build(
+                    &mut self.data,
+                    &self.state.device,
+                    &self.state.queue,
+                    self.state.size,
+                ),
         );
 
         unsafe { self.renderers.as_ref().unwrap_unchecked() }.visit(

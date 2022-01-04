@@ -2,9 +2,7 @@
 #![feature(generic_const_exprs)]
 #![feature(maybe_uninit_array_assume_init)]
 #![feature(maybe_uninit_slice)]
-#![feature(negative_impls)]
 #![feature(maybe_uninit_extra)]
-#![feature(slice_take)]
 #![feature(allocator_api)]
 
 use crate::array_vec::ArrayVec;
@@ -56,8 +54,13 @@ struct UiActions {
 
 trait RendererBuilder<Data> {
     type Output: Renderer<Data>;
-    fn build(self, data: &mut Data, device: &wgpu::Device, size: PhysicalSize<u32>)
-        -> Self::Output;
+    fn build(
+        self,
+        data: &mut Data,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        size: PhysicalSize<u32>,
+    ) -> Self::Output;
 }
 
 type Bga = ArrayVec<Range<usize>, MAX_BIND_GROUPS>;

@@ -12,6 +12,7 @@ impl<Data> RendererBuilder<Data> for () {
         self,
         _data: &mut Data,
         _device: &wgpu::Device,
+        _queue: &wgpu::Queue,
         _size: PhysicalSize<u32>,
     ) -> Self::Output {
     }
@@ -90,11 +91,12 @@ where
         self,
         data: &mut Data,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         size: PhysicalSize<u32>,
     ) -> Self::Output {
         (
-            self.0.build(data, device, size),
-            self.1.build(data, device, size),
+            self.0.build(data, device, queue, size),
+            self.1.build(data, device, queue, size),
         )
     }
 }
