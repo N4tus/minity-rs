@@ -203,7 +203,7 @@ fn main() {
         },
         Some(VirtualKeyCode::R),
         &window,
-        tuple_list!(model_renderer, camera, ray_tracer, light),
+        tuple_list!(camera, ray_tracer, model_renderer, light),
     );
     window.run(renderer);
 }

@@ -62,6 +62,7 @@ fn create_tex(
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Nearest,
             mipmap_filter: wgpu::FilterMode::Nearest,
+            // compare: Some(wgpu::CompareFunction::Less),
             ..Default::default()
         }),
     )
@@ -173,12 +174,7 @@ impl Renderer<App> for ModelRenderer {
                             view: wgpu.view,
                             resolve_target: None,
                             ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(Color {
-                                    r: data.bg[0] as f64,
-                                    g: data.bg[1] as f64,
-                                    b: data.bg[2] as f64,
-                                    a: 1.0,
-                                }),
+                                load: wgpu::LoadOp::Load,
                                 store: true,
                             },
                         },
@@ -186,7 +182,7 @@ impl Renderer<App> for ModelRenderer {
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                         view: wgpu.depth_view,
                         depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(1.0),
+                            load: wgpu::LoadOp::Load,
                             store: true,
                         }),
                         stencil_ops: None,
@@ -603,7 +599,7 @@ impl RendererBuilder<App> for LightRendererBuilder {
         size: PhysicalSize<u32>,
     ) -> Self::Output {
         // The LightRenderer is built after the CameraRenderer, so data.proj has a proper value
-        assert!(!data.view_proj.is_identity());
+        //assert!(!data.view_proj.is_identity());
         let uniform_data = LightUniform {
             view_proj: (OPENGL_TO_WGPU_MATRIX * data.view_proj).into(),
             position: [data.light_data.x, data.light_data.y, data.light_data.z],
@@ -814,7 +810,12 @@ impl Renderer<App> for RayTracer {
                         view: wgpu.view,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
+                            load: wgpu::LoadOp::Clear(Color {
+                                r: data.bg[0] as f64,
+                                g: data.bg[1] as f64,
+                                b: data.bg[2] as f64,
+                                a: 1.0,
+                            }),
                             store: true,
                         },
                     },
@@ -822,7 +823,7 @@ impl Renderer<App> for RayTracer {
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: wgpu.depth_view,
                     depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
+                        load: wgpu::LoadOp::Clear(1.0),
                         store: true,
                     }),
                     stencil_ops: None,
