@@ -20,9 +20,52 @@ pub(crate) struct ModelRenderer {
     index_buffer: wgpu::Buffer,
     material_buffer: wgpu::Buffer,
     images: Vec<(wgpu::Texture, wgpu::TextureView, wgpu::Sampler)>,
+    default_image: (wgpu::Texture, wgpu::TextureView, wgpu::Sampler),
 }
 
 pub(crate) struct ModelRendererBuilder;
+
+fn create_tex(
+    image_name: &str,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    data: &[u8],
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView, wgpu::Sampler) {
+    let tex = device.create_texture_with_data(
+        queue,
+        &wgpu::TextureDescriptor {
+            label: Some(image_name),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+        },
+        data,
+    );
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    (
+        tex,
+        view,
+        device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some(image_name),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        }),
+    )
+}
 
 impl RendererBuilder<App> for ModelRendererBuilder {
     type Output = ModelRenderer;
@@ -34,8 +77,8 @@ impl RendererBuilder<App> for ModelRendererBuilder {
         queue: &wgpu::Queue,
         _size: PhysicalSize<u32>,
     ) -> Self::Output {
-        let (vertex_buffer, index_buffer, material_buffer, images) = {
-            let (data, indices, mat_count, images) = if let Some(m) = &data.model {
+        let (vertex_buffer, index_buffer, material_buffer, images, image_size) = {
+            let (data, indices, mat_count, images, img_size) = if let Some(m) = &data.model {
                 (
                     bytemuck::cast_slice(m.vertices.as_slice()),
                     bytemuck::cast_slice(m.indices.as_slice()),
@@ -43,44 +86,29 @@ impl RendererBuilder<App> for ModelRendererBuilder {
                     m.images_storage
                         .iter()
                         .map(|img| {
-                            let tex = device.create_texture_with_data(
+                            create_tex(
+                                "image",
+                                device,
                                 queue,
-                                &wgpu::TextureDescriptor {
-                                    label: Some("image"),
-                                    size: wgpu::Extent3d {
-                                        width: img.width(),
-                                        height: img.height(),
-                                        depth_or_array_layers: 1,
-                                    },
-                                    mip_level_count: 1,
-                                    sample_count: 1,
-                                    dimension: wgpu::TextureDimension::D2,
-                                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                                    usage: wgpu::TextureUsages::COPY_DST
-                                        | wgpu::TextureUsages::TEXTURE_BINDING,
-                                },
                                 img.as_rgba8().unwrap(),
-                            );
-                            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-                            (
-                                tex,
-                                view,
-                                device.create_sampler(&wgpu::SamplerDescriptor {
-                                    label: Some("image sampler"),
-                                    address_mode_u: wgpu::AddressMode::ClampToEdge,
-                                    address_mode_v: wgpu::AddressMode::ClampToEdge,
-                                    address_mode_w: wgpu::AddressMode::ClampToEdge,
-                                    mag_filter: wgpu::FilterMode::Linear,
-                                    min_filter: wgpu::FilterMode::Nearest,
-                                    mipmap_filter: wgpu::FilterMode::Nearest,
-                                    ..Default::default()
-                                }),
+                                img.width(),
+                                img.height(),
                             )
                         })
                         .collect_vec(),
+                    m.images_storage
+                        .first()
+                        .map(|s| (s.as_rgba8().unwrap().len(), s.width(), s.height()))
+                        .unwrap_or_default(),
                 )
             } else {
-                ([0u8; 0].as_slice(), [0u8; 0].as_slice(), 1, vec![])
+                (
+                    [0u8; 0].as_slice(),
+                    [0u8; 0].as_slice(),
+                    1,
+                    vec![],
+                    (0, 0, 0),
+                )
             };
             (
                 device.create_buffer_init(&BufferInitDescriptor {
@@ -101,14 +129,26 @@ impl RendererBuilder<App> for ModelRendererBuilder {
                     mapped_at_creation: false,
                 }),
                 images,
+                img_size,
             )
         };
         data.dirty.insert(Dirty::MATERIAL);
+
+        let default_image = create_tex(
+            "default_image",
+            device,
+            queue,
+            vec![0_u8; image_size.0].as_slice(),
+            image_size.1,
+            image_size.2,
+        );
+
         Self::Output {
             vertex_buffer,
             index_buffer,
             material_buffer,
             images,
+            default_image,
         }
     }
 }
@@ -161,9 +201,16 @@ impl Renderer<App> for ModelRenderer {
                 render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
 
                 let material_uniform = uniforms.next().unwrap()[0];
+
+                // each material has its own bind group.
+                let image_bg = uniforms.next().unwrap();
                 for (index, group) in model.groups.iter().enumerate() {
                     let offset = index * std::mem::size_of::<MaterialDataPadding>();
                     render_pass.set_bind_group(1, material_uniform, &[offset as DynamicOffset]);
+
+                    // the material index of this group.
+                    let material_idx = group.material.unwrap_or_default();
+                    render_pass.set_bind_group(2, image_bg[material_idx], &[]);
                     render_pass.draw_indexed(group.index_range(), 0, 0..1);
                 }
             }
@@ -192,7 +239,7 @@ impl Renderer<App> for ModelRenderer {
         });
     }
 
-    fn shader(&self, _data: &mut App, device: &wgpu::Device) -> ShaderAction {
+    fn shader(&self, data: &mut App, device: &wgpu::Device) -> ShaderAction {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("material bind group layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -218,16 +265,22 @@ impl Renderer<App> for ModelRenderer {
                 }),
             }],
         });
-        let binding = &mut 0_u32;
+        let mut binding = 0_u32;
+        let mut type_toggle = false;
         let mut tex_bgle = || {
-            *binding += 1;
+            binding += 1;
+            type_toggle = !type_toggle;
             wgpu::BindGroupLayoutEntry {
-                binding: *binding - 1,
+                binding: binding - 1,
                 visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
+                ty: if type_toggle {
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    }
+                } else {
+                    wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)
                 },
                 count: None,
             }
@@ -235,20 +288,75 @@ impl Renderer<App> for ModelRenderer {
         let image_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("image bind group layout"),
-                // ambient diffuse specular shininess
-                entries: &[tex_bgle(), tex_bgle(), tex_bgle(), tex_bgle()],
+                entries: &[
+                    tex_bgle(), // ambient
+                    tex_bgle(), // ambient
+                    tex_bgle(), // diffuse
+                    tex_bgle(), // diffuse
+                    tex_bgle(), // specular
+                    tex_bgle(), // specular
+                    tex_bgle(), // shininess
+                    tex_bgle(), // shininess
+                ],
             });
+        let igl = &image_group_layout;
+        let image_groups = data
+            .model
+            .iter()
+            .flat_map(|m| {
+                m.materials.material_info.iter().map(|mi| {
+                    let mut binding = 0_u32;
+                    let mut type_toggle = false;
+                    let mut tex_bge = move |tex_idx: Option<usize>| {
+                        binding += 1;
+                        type_toggle = !type_toggle;
+                        let binding_resource = tex_idx
+                            .and_then(|tex_idx| self.images.get(tex_idx))
+                            .unwrap_or(&self.default_image);
+                        wgpu::BindGroupEntry {
+                            binding: binding - 1,
+                            resource: if type_toggle {
+                                wgpu::BindingResource::TextureView(&binding_resource.1)
+                            } else {
+                                wgpu::BindingResource::Sampler(&binding_resource.2)
+                            },
+                        }
+                    };
+                    device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some(format!("images for `{}`", mi.name).as_str()),
+                        layout: igl,
+                        entries: &[
+                            tex_bge(mi.ambient_texture),
+                            tex_bge(mi.ambient_texture),
+                            tex_bge(mi.diffuse_texture),
+                            tex_bge(mi.diffuse_texture),
+                            tex_bge(mi.specular_texture),
+                            tex_bge(mi.specular_texture),
+                            tex_bge(mi.shininess_texture),
+                            tex_bge(mi.shininess_texture),
+                        ],
+                    })
+                })
+            })
+            .collect_vec();
         // let image_group = data.model.map(|model| model.materials.material_info.iter);
         ShaderAction {
-            create_bind_groups: vec![CreateBindGroup {
-                name: "material",
-                groups: vec![group],
-                layout,
-            }],
+            create_bind_groups: vec![
+                CreateBindGroup {
+                    name: "material",
+                    groups: vec![group],
+                    layout,
+                },
+                CreateBindGroup {
+                    name: "images",
+                    groups: image_groups,
+                    layout: image_group_layout,
+                },
+            ],
             create_pipeline: Some(CreatePipeline {
                 src: "shader_src/model.wgsl",
                 layout: VERTEX_LAYOUT,
-                uniforms: array_vec!["camera", "material"],
+                uniforms: array_vec!["camera", "material", "images"],
                 topology: wgpu::PrimitiveTopology::TriangleList,
             }),
         }

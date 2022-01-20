@@ -26,7 +26,7 @@ struct Vertex  {
 
 struct VertexOutput {
     [[builtin(position)]] clip_position: vec4<f32>;
-    [[location(0)]] color: vec4<f32>;
+    [[location(0)]] uv: vec2<f32>;
 };
 
 [[stage(vertex)]]
@@ -35,13 +35,30 @@ fn vs_main(
 ) -> VertexOutput {
     var out: VertexOutput;
     out.clip_position = camera.view_proj * vec4<f32>(vertex.pos, 1.0);
-    out.color = vec4<f32>(material.ambient, 1.0);
+    out.uv = vertex.uv;
     return out;
 }
 
 // Fragment shader
 
+[[group(2), binding(0)]]
+var t_ambient: texture_2d<f32>;
+[[group(2), binding(1)]]
+var s_ambient: sampler;
+[[group(2), binding(2)]]
+var t_diffuse: texture_2d<f32>;
+[[group(2), binding(3)]]
+var s_diffuse: sampler;
+[[group(2), binding(4)]]
+var t_specular: texture_2d<f32>;
+[[group(2), binding(5)]]
+var s_specular: sampler;
+[[group(2), binding(6)]]
+var t_shininess: texture_2d<f32>;
+[[group(2), binding(7)]]
+var s_shininess: sampler;
+
 [[stage(fragment)]]
 fn fs_main(in: VertexOutput) -> [[location(0)]] vec4<f32> {
-    return in.color;
+    return textureSample(t_diffuse, s_diffuse, in.uv);
 }

@@ -132,7 +132,7 @@ pub(crate) struct Group {
     vertex_end: usize,
     transformation: Matrix4<f32>,
     name: String,
-    material: Option<usize>,
+    pub(crate) material: Option<usize>,
 }
 
 pub(crate) struct Model {
