@@ -61,9 +61,8 @@ var s_shininess: sampler;
 [[stage(fragment)]]
 fn fs_main(in: VertexOutput) -> [[location(0)]] vec4<f32> {
     var g = textureSample(t_diffuse, s_diffuse, in.uv);
-    if (g.a < 0.1) {
+    if (g.a < 0.001) {
         discard;
     }
-    //g.a = 1.0 - g.a;
     return g;
 }
