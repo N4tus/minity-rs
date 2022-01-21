@@ -128,8 +128,6 @@ impl Vertex {
 pub(crate) struct Group {
     indices_start: usize,
     indices_end: usize,
-    vertex_start: usize,
-    vertex_end: usize,
     transformation: Matrix4<f32>,
     name: String,
     pub(crate) material: Option<usize>,
@@ -226,7 +224,6 @@ fn load_model_with_path(path: impl Into<PathBuf>) -> Result<Model, LoadError> {
     let mut groups = Vec::with_capacity(model.len());
 
     let mut current_index_buffer_index = 0usize;
-    let mut current_vertex_buffer_index = 0usize;
     for model in model {
         let vertex_count = model.mesh.positions.len() / 3;
         let index_offset = vertex_buffer_data.len() as u32;
@@ -275,15 +272,12 @@ fn load_model_with_path(path: impl Into<PathBuf>) -> Result<Model, LoadError> {
         groups.push(Group {
             indices_start: current_index_buffer_index,
             indices_end: current_index_buffer_index + model.mesh.indices.len(),
-            vertex_start: current_vertex_buffer_index,
-            vertex_end: current_vertex_buffer_index + vertex_count,
             transformation: cgmath::Matrix4::identity(),
             name: model.name,
             material: model.mesh.material_id,
         });
 
         current_index_buffer_index += model.mesh.indices.len();
-        current_vertex_buffer_index += vertex_count;
     }
 
     let mut materials = ArrayVec::new();
